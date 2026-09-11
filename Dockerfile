@@ -6,6 +6,7 @@ ARG COMPOSER_IMAGE=composer:2
 ARG NODE_IMAGE=node:24-bookworm-slim
 
 FROM ${COMPOSER_IMAGE} AS composer-bin
+FROM ${NODE_IMAGE} AS node-bin
 FROM ${PHP_IMAGE} AS php-base
 RUN install-php-extensions pdo_pgsql redis pcntl intl zip bcmath gd opcache \
     && if command -v getcap >/dev/null && getcap /usr/local/bin/frankenphp | grep -q .; then \
@@ -31,13 +32,12 @@ RUN mkdir -p storage/framework/views storage/framework/sessions storage/framewor
     && php artisan filament:assets --no-interaction \
     && cp vendor/laravel/octane/src/Commands/stubs/frankenphp-worker.php public/frankenphp-worker.php
 
-FROM ${NODE_IMAGE} AS frontend
-WORKDIR /app
-COPY package.json package-lock.json ./
+FROM dependencies AS frontend
+# Wayfinder genera rutas TypeScript ejecutando `php artisan` durante el build,
+# por lo que esta etapa necesita PHP y Node 24 en el mismo entorno.
+COPY --from=node-bin /usr/local/ /usr/local/
 # Instala tambien devDependencies: Vite, TypeScript y Tailwind viven normalmente ahi.
 RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
-# Copia React/TypeScript/CSS/HTML y vendor para temas Tailwind/Filament.
-COPY --from=dependencies /app /app
 RUN npm run build
 
 FROM php-base AS app
