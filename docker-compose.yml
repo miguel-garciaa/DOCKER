@@ -1,0 +1,198 @@
+name: ${COMPOSE_PROJECT_NAME:-laravel}
+
+# Metadatos leidos por deploy.sh para configurar el limite conjunto del host.
+# cgroup_parent por si solo NO configura limites: ejecutar deploy.sh primero.
+x-project-limits:
+  cpus: ${PROJECT_CPUS:-4}
+  memory: ${PROJECT_MEMORY:-8G}
+
+x-logging: &logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-app-environment: &app-environment
+  APP_NAME: ${APP_NAME:-Laravel}
+  APP_ENV: production
+  APP_DEBUG: "false"
+  APP_KEY: ${APP_KEY:?Falta APP_KEY}
+  APP_URL: https://${APP_DOMAIN:?Falta APP_DOMAIN}
+  APP_DOMAIN: ${APP_DOMAIN}
+  OCTANE_SERVER: frankenphp
+  OCTANE_HTTPS: "true"
+  OCTANE_WORKERS: ${OCTANE_WORKERS:-2}
+  LOG_CHANNEL: stderr
+  LOG_LEVEL: warning
+  DB_CONNECTION: pgsql
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_DATABASE: ${DB_DATABASE:-laravel}
+  DB_USERNAME: ${DB_USERNAME:-laravel}
+  DB_PASSWORD: ${DB_PASSWORD:?Falta DB_PASSWORD}
+  REDIS_CLIENT: phpredis
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_PASSWORD: ${REDIS_PASSWORD:?Falta REDIS_PASSWORD}
+  REDIS_PREFIX: ${COMPOSE_PROJECT_NAME:-laravel}_
+  CACHE_STORE: redis
+  SESSION_DRIVER: redis
+  SESSION_SECURE_COOKIE: "true"
+  SESSION_HTTP_ONLY: "true"
+  SESSION_SAME_SITE: lax
+  QUEUE_CONNECTION: redis
+  REDIS_QUEUE_RETRY_AFTER: "120"
+  FILESYSTEM_DISK: local
+  MAIL_MAILER: resend
+  RESEND_KEY: ${RESEND_KEY:?Falta RESEND_KEY}
+  MAIL_FROM_ADDRESS: ${MAIL_FROM_ADDRESS:?Falta MAIL_FROM_ADDRESS}
+  MAIL_FROM_NAME: ${APP_NAME:-Laravel}
+
+x-app: &app
+  image: ${APP_IMAGE:?Falta APP_IMAGE}
+  cgroup_parent: project-${COMPOSE_PROJECT_NAME:-laravel}.slice
+  user: "10001:10001"
+  init: true
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  environment: *app-environment
+  volumes:
+    - uploads:/app/storage/app
+  # Cache de codigo y estado Octane PRIVADOS para cada contenedor/release.
+  tmpfs:
+    - /tmp:uid=10001,gid=10001,mode=1770,size=128m
+    - /app/bootstrap/cache:uid=10001,gid=10001,mode=0770,size=64m
+    - /app/storage/framework:uid=10001,gid=10001,mode=0770,size=128m
+    - /app/storage/logs:uid=10001,gid=10001,mode=0770,size=16m
+  depends_on:
+    postgres: {condition: service_healthy}
+    redis: {condition: service_healthy}
+  stop_grace_period: 75s
+  logging: *logging
+
+services:
+  release:
+    <<: *app
+    profiles: [ops]
+    restart: "no"
+    command: [php, artisan, migrate, --force, --no-interaction]
+    networks: [data, outbound]
+
+  app:
+    <<: *app
+    command: [web]
+    networks:
+      edge: {ipv4_address: 172.30.91.3}
+      data: {}
+      outbound: {}
+    healthcheck:
+      test: [CMD, php, /app/docker/health.php]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  queue:
+    <<: *app
+    command: [queue]
+    networks: [data, outbound]
+
+  scheduler:
+    <<: *app
+    command: [scheduler]
+    networks: [data, outbound]
+
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:18-bookworm}
+    cgroup_parent: project-${COMPOSE_PROJECT_NAME:-laravel}.slice
+    user: postgres
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Falta POSTGRES_PASSWORD}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+      PGDATA: /var/lib/postgresql/18/docker
+      DB_DATABASE: ${DB_DATABASE:-laravel}
+      DB_USERNAME: ${DB_USERNAME:-laravel}
+      DB_PASSWORD: ${DB_PASSWORD}
+    command: [postgres, -c, max_connections=60, -c, shared_buffers=256MB]
+    volumes:
+      # PostgreSQL 18+: el volumen se monta en el directorio PADRE.
+      - postgres_data:/var/lib/postgresql
+      - ./docker/postgres-init.sh:/docker-entrypoint-initdb.d/10-app.sh:ro
+    tmpfs: [/tmp:mode=1777,size=64m, /var/run/postgresql:mode=1777,size=16m]
+    shm_size: 256m
+    networks: [data]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -h 127.0.0.1 -U "$${POSTGRES_USER}" -d postgres']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+    stop_grace_period: 60s
+    logging: *logging
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:8-bookworm}
+    cgroup_parent: project-${COMPOSE_PROJECT_NAME:-laravel}.slice
+    user: redis
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    entrypoint: [/bin/sh, /usr/local/etc/redis/start.sh]
+    volumes:
+      - redis_data:/data
+      - ./docker/redis-start.sh:/usr/local/etc/redis/start.sh:ro
+    tmpfs: [/tmp:mode=1777,size=16m]
+    networks: [data]
+    healthcheck:
+      test: [CMD-SHELL, 'REDISCLI_AUTH="$${REDIS_PASSWORD}" redis-cli ping | grep -qx PONG']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    stop_grace_period: 30s
+    logging: *logging
+
+  cloudflared:
+    image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:latest}
+    cgroup_parent: project-${COMPOSE_PROJECT_NAME:-laravel}.slice
+    user: "65532:65532"
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      # Solo este contenedor recibe el token. No aparece en argv.
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?Falta TUNNEL_TOKEN}
+    command: [tunnel, --no-autoupdate, --metrics, 0.0.0.0:2000, run]
+    networks:
+      edge: {ipv4_address: 172.30.91.2}
+      tunnel_outbound: {}
+    depends_on:
+      app: {condition: service_healthy}
+    logging: *logging
+
+# Ningun servicio publica puertos del host. No montar /var/run/docker.sock.
+networks:
+  edge:
+    internal: true
+    ipam:
+      config: [{subnet: 172.30.91.0/29}]
+  data:
+    internal: true
+  outbound: {}
+  tunnel_outbound: {}
+
+volumes:
+  postgres_data:
+  redis_data:
+  uploads:
