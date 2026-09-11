@@ -133,7 +133,9 @@ services:
       # PostgreSQL 18+: el volumen se monta en el directorio PADRE.
       - postgres_data:/var/lib/postgresql
       - ./docker/postgres-init.sh:/docker-entrypoint-initdb.d/10-app.sh:ro
-    tmpfs: [/tmp:mode=1777,size=64m, /var/run/postgresql:mode=1777,size=16m]
+    tmpfs:
+      - "/tmp:mode=1777,size=64m"
+      - "/var/run/postgresql:mode=1777,size=16m"
     shm_size: 256m
     networks: [data]
     healthcheck:
@@ -159,7 +161,8 @@ services:
     volumes:
       - redis_data:/data
       - ./docker/redis-start.sh:/usr/local/etc/redis/start.sh:ro
-    tmpfs: [/tmp:mode=1777,size=16m]
+    tmpfs:
+      - "/tmp:mode=1777,size=16m"
     networks: [data]
     healthcheck:
       test: [CMD-SHELL, 'REDISCLI_AUTH="$${REDIS_PASSWORD}" redis-cli ping | grep -qx PONG']
