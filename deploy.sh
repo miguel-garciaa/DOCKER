@@ -72,6 +72,9 @@ if [[ ! -f .env ]]; then
     ask APP_IMAGE 'Imagen publicada (registry/ruta@sha256:...)'
     [[ $APP_IMAGE =~ ^[a-zA-Z0-9./:_-]+@sha256:[a-f0-9]{64}$ ]] || fail 'Usar un digest SHA-256 valido'
     ask MAIL_FROM_ADDRESS 'Remitente verificado en Resend'
+    ask FILAMENT_ADMIN_EMAIL 'Email del administrador de Filament'
+    [[ $FILAMENT_ADMIN_EMAIL =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] \
+        || fail 'Email de administrador invalido'
     ask RESEND_KEY 'RESEND_KEY' true
     ask TUNNEL_TOKEN 'TUNNEL_TOKEN' true
     temporary_env=$(mktemp .env.tmp.XXXXXX)
@@ -91,6 +94,7 @@ POSTGRES_PASSWORD='$(openssl rand -hex 32)'
 REDIS_PASSWORD='$(openssl rand -hex 32)'
 RESEND_KEY='$RESEND_KEY'
 MAIL_FROM_ADDRESS='$MAIL_FROM_ADDRESS'
+FILAMENT_ADMIN_EMAIL='$FILAMENT_ADMIN_EMAIL'
 TUNNEL_TOKEN='$TUNNEL_TOKEN'
 POSTGRES_IMAGE=postgres:18-bookworm
 REDIS_IMAGE=redis:8-bookworm

@@ -1,4 +1,5 @@
 <?php
+
 // Solo comprueba el arranque HTTP. El deploy comprueba BD/Redis por separado.
 $curl = curl_init('http://127.0.0.1:8000/up');
 curl_setopt_array($curl, [

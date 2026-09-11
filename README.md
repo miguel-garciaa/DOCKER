@@ -16,7 +16,7 @@ Visitante --HTTPS--> Cloudflare --tunel cifrado--> cloudflared
 queue / scheduler: misma imagen y datos de la aplicacion, procesos independientes.
 ```
 
-Esta entrega contiene configuracion y scripts para integrar en TU aplicacion. No incluye una aplicacion Laravel ficticia, credenciales, un dominio ni una imagen ya publicada. Se han validado la sintaxis Bash/PHP, Compose y la existencia de las etiquetas base. **No se ha construido ni arrancado el stack completo:** no se dispone aqui de tu repositorio ni de un motor Docker en ejecucion. Hay que completar la prueba de staging indicada abajo antes de produccion.
+El repositorio incluye una aplicacion Laravel 13 completa basada en el starter oficial de React: React 19, TypeScript, Inertia 3, Tailwind 4, autenticacion, Octane, Filament 5 y Resend. Tambien contiene el build de produccion, los servicios Docker y los workflows de GitHub Actions. No contiene credenciales, un dominio ni una imagen publicada hasta que se ejecute el workflow.
 
 ## Sistema base y frontend
 
@@ -68,6 +68,11 @@ docker-compose.yml               # todos los servicios del proyecto
 deploy.sh                        # bootstrap y despliegue
 .env.example                     # referencia; deploy genera .env
 .dockerignore / .gitignore / .gitattributes
+app/ bootstrap/ config/ routes/  # aplicacion Laravel 13
+resources/                       # React, TypeScript y Tailwind
+composer.lock / package-lock.json
+.github/workflows/
+  tests.yml                      # valida y publica la imagen en GHCR
 docker/
   Caddyfile                      # HTTP interno, assets y Octane
   php.ini
@@ -75,36 +80,9 @@ docker/
   health.php / check-services.php
   postgres-init.sh / redis-start.sh
   project-limits.sh              # presupuesto CPU/RAM comun mediante systemd
-  laravel-bootstrap.example.php  # fragmento para integrar, no sustitucion automatica
 ```
 
-Copia estos archivos a la raiz del proyecto donde estan `artisan` y `composer.json`. **Fusiona** `.gitignore`, `.gitattributes` y los cambios de `bootstrap/app.php` con los existentes. El script localiza su propia carpeta: no hay que rellenar una ruta `PROYECTO_DIR`.
-
-## Preparacion de la aplicacion: una vez, en desarrollo/CI
-
-1. Usa Laravel 13 y PHP 8.4 con tus dependencias verificadas por Composer. Laravel 13 requiere PHP 8.3 o superior. El host Ubuntu no necesita PHP, Node ni Composer: van en el build. [Requisitos oficiales](https://laravel.com/docs/13.x/deployment).
-2. Si aun no estan instalados:
-
-   ```bash
-   composer require laravel/octane resend/resend-php
-   php artisan octane:install --server=frankenphp
-   # Solo si Filament no forma ya parte del proyecto:
-   composer require filament/filament:"^5.0"
-   php artisan filament:install --panels
-   ```
-
-   No repitas instaladores sobre una configuracion existente. Versiona `composer.lock` y `package-lock.json`. El Dockerfile espera npm/Vite con salida `public/build` y admite React, TypeScript, CSS, Tailwind y plantillas HTML/Blade definidos por la aplicacion. Incluye `config/octane.php` publicado. Si usas pnpm, SSR o una ruta de salida distinta, adapta esa etapa/proceso. Los scripts Composer propios no deben consultar BD ni exigir secretos durante el build.
-
-3. Fusiona el ejemplo `docker/laravel-bootstrap.example.php` con `bootstrap/app.php`: conserva tus rutas/API/middleware; habilita `/up` y confia unicamente en `172.30.91.2`. Solo se aceptan `X-Forwarded-For` y `X-Forwarded-Proto`. No se confia en `X-Forwarded-Host`. Cloudflare proporciona [las cabeceras del visitante y protocolo](https://developers.cloudflare.com/fundamentals/reference/http-headers/).
-4. Resend utiliza `MAIL_MAILER=resend` y, en `config/services.php`:
-
-   ```php
-   'resend' => ['key' => env('RESEND_KEY')],
-   ```
-
-   En `config/mail.php` debe existir `'resend' => ['transport' => 'resend']` dentro de `mailers`. Verifica el dominio del remitente y sus registros DNS en Resend. No necesitas publicar SMTP ni configurar un servidor de correo. [Driver Resend de Laravel](https://laravel.com/docs/13.x/mail#resend-driver).
-5. Filament es parte de Laravel, no otro contenedor. No existen claves obligatorias genericas `FILAMENT_KEY` o similares. Se usa `FILESYSTEM_DISK=local` para privados; elige `public` explicitamente solo en campos que realmente deban publicar archivos. Implementa `FilamentUser::canAccessPanel()` con tu regla real de administracion, ademas de Policies para los recursos; nunca devolver `true` para cualquier usuario. Configura MFA segun tu politica. Los assets se publican durante el build y los caches se generan por contenedor. [Produccion de Filament](https://filamentphp.com/docs/5.x/deployment).
-6. El worker consume `default`, con timeout 60 s y `retry_after=120`. Comprueba en `config/queue.php` que Redis lee `env('REDIS_QUEUE_RETRY_AFTER', 120)`. Jobs mas largos requieren subir ambos limites y `stop_grace_period`; timeout debe ser menor que retry_after. Los jobs deben ser idempotentes: un reintento puede repetir el envio de correo u otros efectos. Filament puede necesitar tablas de batches/failed jobs/imports/exports: conserva las migraciones que requieran tus funciones.
+`bootstrap/app.php` ya habilita `/up` y confia exclusivamente en la IP fija de `cloudflared` para `X-Forwarded-For` y `X-Forwarded-Proto`. El acceso a `/admin` exige que el email del usuario coincida con `FILAMENT_ADMIN_EMAIL`.
 
 Ejecuta los tests, analisis y build de TU proyecto antes de publicar. Por ejemplo, si estan definidos:
 
@@ -117,7 +95,17 @@ npm run build
 
 No se ha afirmado que esos tests hayan pasado aqui.
 
-## Construir fuera del VPS
+## Publicar la imagen con GitHub Actions
+
+Cada `push` a `main` ejecuta tests y construye `ghcr.io/miguel-garciaa/docker:main`. El workflow se autentica con `GITHUB_TOKEN`; no necesita guardar un token personal en el repositorio. Al terminar, el resumen del job muestra el valor completo e inmutable que debes pegar en `APP_IMAGE`:
+
+```text
+APP_IMAGE=ghcr.io/miguel-garciaa/docker@sha256:DIGEST_REAL
+```
+
+Si el paquete GHCR permanece privado, el VPS necesita iniciar sesion con un token clasico que tenga `read:packages`. Un paquete publico puede descargarse anonimamente.
+
+## Construir manualmente fuera del VPS
 
 Desde un runner CI o tu equipo con Docker, ya autenticado en el registry:
 
