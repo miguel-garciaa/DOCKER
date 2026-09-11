@@ -79,7 +79,8 @@ if [[ ! -f .env ]]; then
     cat > "$temporary_env" <<EOF
 COMPOSE_PROJECT_NAME=laravel
 PROJECT_CPUS=4
-PROJECT_MEMORY=8G
+PROJECT_MEMORY=6G
+PROJECT_SWAP=1G
 APP_NAME=Laravel
 APP_DOMAIN='$APP_DOMAIN'
 APP_KEY='base64:$(openssl rand -base64 32)'
@@ -107,17 +108,18 @@ base=(docker compose --env-file .env -f docker-compose.yml)
 
 # Leer solo parametros no sensibles ya interpretados por Compose, sin source/eval.
 # Los defaults coinciden con x-project-limits para despliegues antiguos.
-project_name=laravel project_cpus=4 project_memory=8G
+project_name=laravel project_cpus=4 project_memory=6G project_swap=1G
 resource_settings=$("${base[@]}" config --environment | awk -F= \
-    '$1 == "COMPOSE_PROJECT_NAME" || $1 == "PROJECT_CPUS" || $1 == "PROJECT_MEMORY"')
+    '$1 == "COMPOSE_PROJECT_NAME" || $1 == "PROJECT_CPUS" || $1 == "PROJECT_MEMORY" || $1 == "PROJECT_SWAP"')
 while IFS='=' read -r key value; do
     case "$key" in
         COMPOSE_PROJECT_NAME) project_name=${value:-laravel} ;;
         PROJECT_CPUS) project_cpus=${value:-4} ;;
-        PROJECT_MEMORY) project_memory=${value:-8G} ;;
+        PROJECT_MEMORY) project_memory=${value:-6G} ;;
+        PROJECT_SWAP) project_swap=${value:-1G} ;;
     esac
 done <<< "$resource_settings"
-bash docker/project-limits.sh "$project_name" "$project_cpus" "$project_memory"
+bash docker/project-limits.sh "$project_name" "$project_cpus" "$project_memory" "$project_swap"
 
 # Las referencias mutables solo se resuelven la primera vez o con --refresh-images.
 # El lock contiene exclusivamente imagenes de infraestructura, nunca secretos.

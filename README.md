@@ -77,7 +77,7 @@ docker/
   entrypoint.sh                  # web, queue y scheduler
   health.php / check-services.php
   postgres-init.sh / redis-start.sh
-  project-limits.sh              # presupuesto CPU/RAM comun mediante systemd
+  project-limits.sh              # presupuesto CPU/RAM/swap mediante systemd
 ```
 
 `bootstrap/app.php` ya habilita `/up` y confia exclusivamente en la IP fija de `cloudflared` para `X-Forwarded-For` y `X-Forwarded-Proto`. El acceso a `/admin` exige que el email del usuario coincida con `FILAMENT_ADMIN_EMAIL`.
@@ -136,25 +136,26 @@ La imagen es reutilizable. Los recursos se limitan **al ejecutar** sus contenedo
 ```dotenv
 COMPOSE_PROJECT_NAME=laravel
 PROJECT_CPUS=4
-PROJECT_MEMORY=8G
+PROJECT_MEMORY=6G
+PROJECT_SWAP=1G
 ```
 
-`8G` representa 8 GiB (8192 MiB). Es un **techo compartido** para app, PostgreSQL, Redis, queue, scheduler, cloudflared y migraciones. No reserva RAM ni nucleos fisicos. Cada servicio puede usar CPU disponible, pero todos juntos quedan limitados al tiempo de CPU equivalente a cuatro nucleos. Los limites se aplican a todos los procesos hijos y a la memoria contabilizada por cgroups, incluidos tmpfs y cache de archivos imputada al grupo. El SO, daemon Docker y la construccion BuildKit quedan fuera de este presupuesto.
+Es un **techo compartido** de 6 GiB de RAM y 1 GiB adicional de swap para app, PostgreSQL, Redis, queue, scheduler, cloudflared y migraciones. No reserva RAM ni nucleos fisicos. Cada servicio puede usar CPU disponible, pero todos juntos quedan limitados al tiempo de CPU equivalente a cuatro nucleos. Los limites se aplican a todos los procesos hijos y a la memoria contabilizada por cgroups, incluidos tmpfs y cache de archivos imputada al grupo. El SO, daemon Docker y la construccion BuildKit quedan fuera de este presupuesto.
 
-`deploy.sh` crea `project-laravel.slice` en systemd con `CPUQuota=400%`, `MemoryMax=8G` y `MemorySwapMax=0`; todos los servicios utilizan el mismo `cgroup_parent`. Comprueba los valores efectivos del kernel y la pertenencia de los contenedores al grupo. Requiere Docker rootful, driver systemd y cgroups v2; se detiene si no se cumplen, sin cambiar ni reiniciar el daemon. La unidad se conserva tras reiniciar el VPS. Referencias: [cgroup_parent en Compose](https://docs.docker.com/reference/compose-file/services/#cgroup_parent) y [control de recursos de systemd](https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html).
+`deploy.sh` crea `project-laravel.slice` en systemd con `CPUQuota=400%`, `MemoryMax=6G` y `MemorySwapMax=1G`; todos los servicios utilizan el mismo `cgroup_parent`. Si el host no tiene al menos 1 GiB de swap, crea `/var/lib/laravel-docker/swapfile`, lo activa y lo registra en `/etc/fstab`. Comprueba los valores efectivos del kernel y la pertenencia de los contenedores al grupo. Requiere Docker rootful, driver systemd y cgroups v2; se detiene si no se cumplen. La unidad se conserva tras reiniciar el VPS. Referencias: [cgroup_parent en Compose](https://docs.docker.com/reference/compose-file/services/#cgroup_parent) y [control de recursos de systemd](https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html).
 
-Se han retirado los techos anteriores por contenedor para compartir el presupuesto sin un reparto fijo. Los ajustes internos de PHP, Redis y PostgreSQL siguen existiendo: subir el presupuesto no cambia automaticamente el numero de workers ni Redis `maxmemory`. Al agotar CPU hay throttling; al agotar RAM puede actuar el OOM killer sobre procesos del grupo. No se añade swap por encima del limite. Monitoriza antes de bajar RAM: el script rechaza un nuevo techo inferior al consumo actual.
+Se han retirado los techos anteriores por contenedor para compartir el presupuesto sin un reparto fijo. Los ajustes internos de PHP, Redis y PostgreSQL siguen existiendo: subir el presupuesto no cambia automaticamente el numero de workers ni Redis `maxmemory`. Al agotar CPU hay throttling. El swap reduce la probabilidad de un OOM durante picos breves, pero su uso sostenido aumenta mucho la latencia; no sustituye RAM ni una configuracion correcta. Monitoriza antes de bajar RAM: el script rechaza un nuevo techo inferior al consumo actual.
 
 Para cambiar el presupuesto, modifica estas dos variables y repite `sudo bash ./deploy.sh`; **no hay que reconstruir la imagen**. En un despliegue ya actualizado, si solo quieres ajustar los recursos en vivo sin migraciones/recreaciones, puedes usar:
 
 ```bash
 # Cambia primero .env a los mismos valores para conservarlos en futuros deploys.
-sudo bash docker/project-limits.sh laravel 2 6G
+sudo bash docker/project-limits.sh laravel 2 6G 1G
 ```
 
 Para otro proyecto utiliza otro `COMPOSE_PROJECT_NAME` (minusculas, numeros y `_`, sin guiones), con su propio presupuesto. No cambies el nombre de un despliegue existente sin planificar la migracion: tambien identifica sus volumenes y redes. La separacion de recursos no resuelve las subredes/dominios de varias apps en el mismo VPS; ajustalos como se indica al final.
 
-Si **8 GB y 4 vCPU son la capacidad fisica total del VPS**, deja RAM al SO y Docker: un techo de 6G o 7G para el proyecto es un punto de partida mas prudente. Un techo de 8G no garantiza que el host disponga de 8G libres para el proyecto. La CPU se comparte con el host; 4 CPU es una cuota maxima, no cuatro nucleos reservados.
+Si **8 GB y 4 vCPU son la capacidad fisica total del VPS**, el techo de 6G deja margen al SO y Docker. La CPU se comparte con el host; 4 CPU es una cuota maxima, no cuatro nucleos reservados.
 
 Verificacion en Ubuntu (para el proyecto `laravel`):
 
@@ -166,7 +167,7 @@ cat /sys/fs/cgroup/project.slice/project-laravel.slice/memory.swap.max
 systemd-cgtop
 ```
 
-Con la configuracion inicial, `memory.max` debe ser `8589934592`, swap `0` y el cociente cuota/periodo de `cpu.max` debe ser 4 (normalmente `400000 100000`). `docker stats` por contenedor no expresa por si solo este techo agregado. Si creas otro servicio o replicas uno existente, debe conservar el mismo `cgroup_parent` para quedar incluido. Ejecutar Compose sin haber preparado la slice no garantiza que haya limite: utiliza `deploy.sh`.
+Con la configuracion inicial, `memory.max` debe ser `6442450944`, `memory.swap.max` debe ser `1073741824` y el cociente cuota/periodo de `cpu.max` debe ser 4 (normalmente `400000 100000`). `docker stats` por contenedor no expresa por si solo este techo agregado. Si creas otro servicio o replicas uno existente, debe conservar el mismo `cgroup_parent` para quedar incluido. Ejecutar Compose sin haber preparado la slice no garantiza que haya limite: utiliza `deploy.sh`.
 
 El primer uso pide dominio y remitente, y solicita `RESEND_KEY`/`TUNNEL_TOKEN` con entrada oculta. Genera `APP_KEY` y passwords aleatorios; los guarda en `.env` con permisos 600 para reinicios y siguientes deploys. Para ejecucion no interactiva, provisiona previamente un `.env` completo mediante tu gestor de secretos. **No borres ni regeneres este archivo en cada despliegue.**
 
@@ -198,7 +199,7 @@ Compose con una sola replica tiene una breve interrupcion al recrear la app. No 
 
 `uploads` persiste `storage/app`; el enlace `public/storage` se construye en la imagen. Los caches de codigo, vistas y estado Octane son privados de cada contenedor para evitar mezclar releases. Archivos temporales de Livewire/Filament en `storage/app` persisten tambien; conserva su limpieza programada. No se garantiza continuidad de una subida HTTP en curso durante un restart.
 
-El presupuesto inicial solicitado es **4 CPU y 8 GiB compartidos**, con 2 workers web y un queue worker. Es un techo configurable, no una capacidad garantizada de peticiones. PostgreSQL puede necesitar ajustes internos y un job puede exceder el limite PHP de 256 MB. Deja margen para SO, Docker, page cache, tmpfs y forks AOF. Usa disco SSD y monitoriza RAM real, OOM, CPU, espacio e I/O. Redis recomienda revisar [`vm.overcommit_memory` para sus forks](https://redis.io/docs/latest/operate/oss_and_stack/management/admin/); aplica el ajuste en el host conforme a tu politica.
+El presupuesto inicial es **4 CPU, 6 GiB de RAM y 1 GiB de swap compartidos**, con 2 workers web y un queue worker. Es un techo configurable, no una capacidad garantizada de peticiones. PostgreSQL puede necesitar ajustes internos y un job puede exceder el limite PHP de 256 MB. Deja margen para SO, Docker, page cache, tmpfs y forks AOF. Usa disco SSD y monitoriza RAM real, swap, OOM, CPU, espacio e I/O. Redis recomienda revisar [`vm.overcommit_memory` para sus forks](https://redis.io/docs/latest/operate/oss_and_stack/management/admin/); aplica el ajuste en el host conforme a tu politica.
 
 Para operar desde la carpeta del despliegue, abre una sesion administrativa y define:
 
@@ -224,7 +225,7 @@ El despliegue nuevo **no copia automaticamente los datos existentes**. Antes del
 
    ```bash
    # Antes de crear contenedores manualmente: usa el nombre/limites de tu .env.
-   sudo bash docker/project-limits.sh laravel 4 8G
+   sudo bash docker/project-limits.sh laravel 4 6G 1G
    docker compose --env-file .env -f docker-compose.yml up -d --wait postgres redis
    docker compose --env-file .env -f docker-compose.yml exec -T postgres sh -c \
      'PGPASSWORD="$DB_PASSWORD" pg_restore -h 127.0.0.1 -U "$DB_USERNAME" -d "$DB_DATABASE" --no-owner --no-privileges --exit-on-error' \

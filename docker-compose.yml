@@ -4,7 +4,8 @@ name: ${COMPOSE_PROJECT_NAME:-laravel}
 # cgroup_parent por si solo NO configura limites: ejecutar deploy.sh primero.
 x-project-limits:
   cpus: ${PROJECT_CPUS:-4}
-  memory: ${PROJECT_MEMORY:-8G}
+  memory: ${PROJECT_MEMORY:-6G}
+  swap: ${PROJECT_SWAP:-1G}
 
 x-logging: &logging
   driver: local
