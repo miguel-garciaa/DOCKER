@@ -16,7 +16,7 @@ Visitante --HTTPS--> Cloudflare --tunel cifrado--> cloudflared
 queue / scheduler: misma imagen y datos de la aplicacion, procesos independientes.
 ```
 
-El repositorio incluye una aplicacion Laravel 13 completa basada en el starter oficial de React: React 19, TypeScript, Inertia 3, Tailwind 4, autenticacion, Octane, Filament 5 y Resend. Tambien contiene el build de produccion, los servicios Docker y los workflows de GitHub Actions. No contiene credenciales, un dominio ni una imagen publicada hasta que se ejecute el workflow.
+El repositorio incluye una aplicacion Laravel 13 completa basada en el starter oficial de React: React 19, TypeScript, Inertia 3, Tailwind 4, autenticacion, Octane, Filament 5 y Resend. Tambien contiene el build de produccion y los servicios Docker. No usa Vercel, GitHub Actions ni un registry para desplegar.
 
 ## Sistema base y frontend
 
@@ -71,8 +71,6 @@ deploy.sh                        # bootstrap y despliegue
 app/ bootstrap/ config/ routes/  # aplicacion Laravel 13
 resources/                       # React, TypeScript y Tailwind
 composer.lock / package-lock.json
-.github/workflows/
-  tests.yml                      # valida y publica la imagen en GHCR
 docker/
   Caddyfile                      # HTTP interno, assets y Octane
   php.ini
@@ -84,40 +82,25 @@ docker/
 
 `bootstrap/app.php` ya habilita `/up` y confia exclusivamente en la IP fija de `cloudflared` para `X-Forwarded-For` y `X-Forwarded-Proto`. El acceso a `/admin` exige que el email del usuario coincida con `FILAMENT_ADMIN_EMAIL`.
 
-Ejecuta los tests, analisis y build de TU proyecto antes de publicar. Por ejemplo, si estan definidos:
+Antes de desplegar cambios ejecuta:
 
 ```bash
-php artisan test
-./vendor/bin/pint --test
-npm run lint
-npm run build
+composer ci:check
 ```
 
-No se ha afirmado que esos tests hayan pasado aqui.
+Este comando ejecuta tests, Pint, PHPStan, comprobaciones TypeScript, formato y el build frontend configurados en el proyecto.
 
-## Publicar la imagen con GitHub Actions
+## Construccion local
 
-Cada `push` a `main` ejecuta tests y construye `ghcr.io/miguel-garciaa/docker:main`. El workflow se autentica con `GITHUB_TOKEN`; no necesita guardar un token personal en el repositorio. Al terminar, el resumen del job muestra el valor completo e inmutable que debes pegar en `APP_IMAGE`:
+`deploy.sh` construye en el VPS una unica imagen local llamada `laravel-app:local`. Los servicios web, migraciones, colas y scheduler reutilizan exactamente esa imagen; Node, npm, Composer y las dependencias de compilacion no quedan en la etapa final.
 
-```text
-APP_IMAGE=ghcr.io/miguel-garciaa/docker@sha256:DIGEST_REAL
-```
-
-Si el paquete GHCR permanece privado, el VPS necesita iniciar sesion con un token clasico que tenga `read:packages`. Un paquete publico puede descargarse anonimamente.
-
-## Construir manualmente fuera del VPS
-
-Desde un runner CI o tu equipo con Docker, ya autenticado en el registry:
+Para construir sin desplegar:
 
 ```bash
-docker buildx build --pull --platform linux/amd64 \
-  --tag ghcr.io/TU_ORGANIZACION/TU_APP:RELEASE \
-  --metadata-file image-metadata.json --push .
+docker compose --env-file .env build app
 ```
 
-Usa `linux/arm64` si ese es el VPS, o construye ambas arquitecturas. En `image-metadata.json`, `containerimage.digest` identifica la imagen publicada. El valor para `APP_IMAGE` sera `ghcr.io/TU_ORGANIZACION/TU_APP@sha256:DIGEST_REAL`.
-
-El build utiliza locks, `composer install --no-dev`, Node 24, `npm ci`, assets compilados y cache de descargas. La imagen final no incorpora Composer, Node ni `node_modules`, porque no son necesarios para servir el frontend compilado. No se hace `config:cache` con secretos durante el build: se ejecuta al arrancar cada proceso con su entorno real. El codigo permanece de solo lectura; no se monta el repositorio del host sobre `/app`.
+El build utiliza locks, `composer install --no-dev`, Node 24, `npm ci`, assets compilados y cache de descargas. No se hace `config:cache` con secretos durante la construccion: se ejecuta al arrancar cada proceso con su entorno real. El codigo permanece de solo lectura y no se monta el repositorio del host sobre `/app`.
 
 Para reconstrucciones reproducibles tambien fija `PHP_IMAGE`, `COMPOSER_IMAGE` y `NODE_IMAGE` mediante `--build-arg NOMBRE=imagen@sha256:...`. Programa actualizaciones probadas de esas referencias. Las etiquetas por defecto facilitan el primer build, pero por si solas no son inmutables. No pases secretos como `ARG` ni como `VITE_*`.
 
@@ -140,9 +123,7 @@ Cada app con datos independientes debe tener su propio tunel. Reutilizar un toke
 
 ## Desplegar: un comando
 
-En un VPS Ubuntu 26.04 LTS nuevo (tambien admite 24.04), copia `deploy.sh`, `docker-compose.yml`, `.env.example` y `docker/` juntos, por ejemplo a `/opt/miapp`. No necesitas copiar todo el codigo: ya esta en la imagen.
-
-Si el registry es privado, autentica previamente al usuario que ejecuta Docker, sin poner contraseñas en argumentos: `sudo docker login ghcr.io`. En provisionamiento automatico utiliza el gestor de credenciales/secretos de tu CI.
+En un VPS Ubuntu 26.04 LTS nuevo (tambien admite 24.04), clona este repositorio completo, entra en su directorio y ejecuta:
 
 ```bash
 sudo bash ./deploy.sh
@@ -158,7 +139,7 @@ PROJECT_CPUS=4
 PROJECT_MEMORY=8G
 ```
 
-`8G` representa 8 GiB (8192 MiB). Es un **techo compartido** para app, PostgreSQL, Redis, queue, scheduler, cloudflared y migraciones. No reserva RAM ni nucleos fisicos. Cada servicio puede usar CPU disponible, pero todos juntos quedan limitados al tiempo de CPU equivalente a cuatro nucleos. Los limites se aplican a todos los procesos hijos y a la memoria contabilizada por cgroups, incluidos tmpfs y cache de archivos imputada al grupo. El SO, daemon Docker y builds de CI quedan fuera de este presupuesto.
+`8G` representa 8 GiB (8192 MiB). Es un **techo compartido** para app, PostgreSQL, Redis, queue, scheduler, cloudflared y migraciones. No reserva RAM ni nucleos fisicos. Cada servicio puede usar CPU disponible, pero todos juntos quedan limitados al tiempo de CPU equivalente a cuatro nucleos. Los limites se aplican a todos los procesos hijos y a la memoria contabilizada por cgroups, incluidos tmpfs y cache de archivos imputada al grupo. El SO, daemon Docker y la construccion BuildKit quedan fuera de este presupuesto.
 
 `deploy.sh` crea `project-laravel.slice` en systemd con `CPUQuota=400%`, `MemoryMax=8G` y `MemorySwapMax=0`; todos los servicios utilizan el mismo `cgroup_parent`. Comprueba los valores efectivos del kernel y la pertenencia de los contenedores al grupo. Requiere Docker rootful, driver systemd y cgroups v2; se detiene si no se cumplen, sin cambiar ni reiniciar el daemon. La unidad se conserva tras reiniciar el VPS. Referencias: [cgroup_parent en Compose](https://docs.docker.com/reference/compose-file/services/#cgroup_parent) y [control de recursos de systemd](https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html).
 
@@ -187,7 +168,7 @@ systemd-cgtop
 
 Con la configuracion inicial, `memory.max` debe ser `8589934592`, swap `0` y el cociente cuota/periodo de `cpu.max` debe ser 4 (normalmente `400000 100000`). `docker stats` por contenedor no expresa por si solo este techo agregado. Si creas otro servicio o replicas uno existente, debe conservar el mismo `cgroup_parent` para quedar incluido. Ejecutar Compose sin haber preparado la slice no garantiza que haya limite: utiliza `deploy.sh`.
 
-El primer uso pide dominio, imagen y remitente, y solicita `RESEND_KEY`/`TUNNEL_TOKEN` con entrada oculta. Genera `APP_KEY` y passwords aleatorios; los guarda en `.env` con permisos 600 para reinicios y siguientes deploys. Para ejecucion no interactiva, provisiona previamente un `.env` completo mediante tu gestor de secretos. **No borres ni regeneres este archivo en cada despliegue.**
+El primer uso pide dominio y remitente, y solicita `RESEND_KEY`/`TUNNEL_TOKEN` con entrada oculta. Genera `APP_KEY` y passwords aleatorios; los guarda en `.env` con permisos 600 para reinicios y siguientes deploys. Para ejecucion no interactiva, provisiona previamente un `.env` completo mediante tu gestor de secretos. **No borres ni regeneres este archivo en cada despliegue.**
 
 El script instala Docker CE y Compose mediante APT firmado si faltan, descarga imagenes, fija las de infraestructura en `compose.images.yml`, espera PostgreSQL/Redis, valida conexiones de Laravel, detiene workers, ejecuta una migracion y recrea la app/colas/scheduler. Comprueba `/up`, la conexion de cloudflared y `/up` por el dominio publico. El endpoint `/up` debe poder devolver 200 al monitor, sin un challenge o login de Access; si proteges toda la aplicacion, adapta el monitor con autenticacion de servicio.
 
@@ -199,15 +180,15 @@ En otros VPS, copia tambien `compose.images.yml` para mantener **los mismos dige
 sudo bash ./deploy.sh --refresh-images
 ```
 
-No cambia las versiones mayores de PostgreSQL/Redis salvo que tu cambies sus referencias. Prueba las nuevas imagenes antes de refrescar en produccion. `APP_IMAGE` queda fuera del lock porque ya exige un digest en el asistente: para una release, cambia ese valor en `.env` y ejecuta de nuevo `deploy.sh`.
+No cambia las versiones mayores de PostgreSQL/Redis salvo que tu cambies sus referencias. Prueba las nuevas imagenes antes de refrescar en produccion. `--refresh-images` tambien actualiza las imagenes base usadas al reconstruir la aplicacion.
 
 ### El objetivo de 120 segundos
 
 **Es un objetivo medible, no una garantia desde un VPS vacio.** APT, locks de cloud-init, ancho de banda, descompresion de capas, inicializacion de BD, migraciones y propagacion de DNS pueden superarlo. El script mide el tiempo real y lo informa; no impone un timeout global que corte una migracion.
 
-Para que sea repetible: imagen de VPS con Docker/Compose preinstalados, imagen de app construida en CI, registry cercano, capas precargadas, tunel/DNS listos y migraciones breves. El primer bootstrap puede durar varios minutos; una actualizacion con capas en cache puede encajar en 120 s, pero debe medirse en tu proveedor. Construir PHP y assets en cada VPS va contra ese objetivo.
+Para acercarse a 120 segundos: usa una imagen de VPS con Docker/Compose preinstalados, conserva la cache de BuildKit, prepara el tunel/DNS y mantén breves las migraciones. El primer bootstrap y la primera compilacion pueden durar varios minutos; las actualizaciones con capas en cache pueden encajar en 120 segundos, pero hay que medirlo en el proveedor.
 
-Compose con una sola replica tiene una breve interrupcion al recrear la app. No promete despliegues sin downtime ni rollback transaccional. Las migraciones deben ser aditivas/compatibles con la version anterior (expandir, migrar datos, retirar despues). No ejecutar `migrate:fresh`. Si una migracion falla, el script se detiene y deja los volumenes intactos; revisar antes de reanudar colas o volver a desplegar. Para rollback de codigo cambia `APP_IMAGE` al digest anterior solo si el esquema sigue siendo compatible; no ejecutes `migrate:rollback` automaticamente.
+Compose con una sola replica tiene una breve interrupcion al recrear la app. No promete despliegues sin downtime ni rollback transaccional. Las migraciones deben ser aditivas/compatibles con la version anterior (expandir, migrar datos, retirar despues). No ejecutar `migrate:fresh`. Si una migracion falla, el script se detiene y deja los volumenes intactos. Para volver al codigo anterior, restaura un commit conocido, reconstruye y despliega solo si el esquema sigue siendo compatible; no ejecutes `migrate:rollback` automaticamente.
 
 ## Persistencia, recursos y operacion
 

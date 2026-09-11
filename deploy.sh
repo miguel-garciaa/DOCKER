@@ -69,8 +69,6 @@ if [[ ! -f .env ]]; then
     ask APP_DOMAIN 'Dominio publico (ejemplo: app.example.com)'
     [[ $APP_DOMAIN =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ && $APP_DOMAIN == *.* ]] \
         || fail 'Dominio invalido: no incluir https, puerto ni ruta'
-    ask APP_IMAGE 'Imagen publicada (registry/ruta@sha256:...)'
-    [[ $APP_IMAGE =~ ^[a-zA-Z0-9./:_-]+@sha256:[a-f0-9]{64}$ ]] || fail 'Usar un digest SHA-256 valido'
     ask MAIL_FROM_ADDRESS 'Remitente verificado en Resend'
     ask FILAMENT_ADMIN_EMAIL 'Email del administrador de Filament'
     [[ $FILAMENT_ADMIN_EMAIL =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] \
@@ -84,7 +82,6 @@ PROJECT_CPUS=4
 PROJECT_MEMORY=8G
 APP_NAME=Laravel
 APP_DOMAIN='$APP_DOMAIN'
-APP_IMAGE='$APP_IMAGE'
 APP_KEY='base64:$(openssl rand -base64 32)'
 OCTANE_WORKERS=2
 DB_DATABASE=laravel
@@ -139,7 +136,11 @@ if [[ ! -f compose.images.yml || ${1:-} == --refresh-images ]]; then
 fi
 dc=("${base[@]}" -f compose.images.yml)
 "${dc[@]}" --profile ops config --quiet
-"${dc[@]}" pull app queue scheduler postgres redis cloudflared
+"${dc[@]}" pull postgres redis cloudflared
+# Construir una vez: app, release, queue y scheduler reutilizan esta misma imagen.
+build_args=()
+[[ ${1:-} == --refresh-images ]] && build_args+=(--pull)
+"${dc[@]}" build "${build_args[@]}" app
 "${dc[@]}" up -d --wait --wait-timeout 120 postgres redis
 "${dc[@]}" run --rm --no-deps -T release php /app/docker/check-services.php
 
