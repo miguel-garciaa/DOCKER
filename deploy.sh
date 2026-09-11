@@ -124,11 +124,29 @@ bash docker/project-limits.sh "$project_name" "$project_cpus" "$project_memory"
 case "${1:-}" in ''|--refresh-images) ;; *) fail 'Uso: deploy.sh [--refresh-images]';; esac
 if [[ ! -f compose.images.yml || ${1:-} == --refresh-images ]]; then
     "${base[@]}" pull postgres redis cloudflared
+    postgres_image=postgres:18-bookworm
+    redis_image=redis:8-bookworm
+    cloudflared_image=cloudflare/cloudflared:latest
+    infra_settings=$("${base[@]}" config --environment | awk -F= \
+        '$1 == "POSTGRES_IMAGE" || $1 == "REDIS_IMAGE" || $1 == "CLOUDFLARED_IMAGE"')
+    while IFS='=' read -r key value; do
+        case "$key" in
+            POSTGRES_IMAGE) postgres_image=${value:-postgres:18-bookworm} ;;
+            REDIS_IMAGE) redis_image=${value:-redis:8-bookworm} ;;
+            CLOUDFLARED_IMAGE) cloudflared_image=${value:-cloudflare/cloudflared:latest} ;;
+        esac
+    done <<< "$infra_settings"
     image_lock=$(mktemp compose.images.yml.tmp.XXXXXX)
     printf 'services:\n' > "$image_lock"
     for service in postgres redis cloudflared; do
-        reference=$("${base[@]}" config --images "$service")
-        digest=$(docker image inspect --format '{{index .RepoDigests 0}}' "$reference")
+        case "$service" in
+            postgres) reference=$postgres_image ;;
+            redis) reference=$redis_image ;;
+            cloudflared) reference=$cloudflared_image ;;
+        esac
+        if ! digest=$(docker image inspect --format '{{index .RepoDigests 0}}' "$reference"); then
+            fail "No se pudo inspeccionar la imagen de $service: $reference"
+        fi
         [[ $digest == *@sha256:* ]] || fail "No se pudo fijar la imagen de $service"
         printf '  %s:\n    image: %s\n' "$service" "$digest" >> "$image_lock"
     done
