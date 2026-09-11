@@ -43,6 +43,20 @@ x-app-environment: &app-environment
   SESSION_SAME_SITE: lax
   QUEUE_CONNECTION: redis
   REDIS_QUEUE_RETRY_AFTER: "120"
+  BROADCAST_CONNECTION: reverb
+  REVERB_APP_ID: ${REVERB_APP_ID:?Falta REVERB_APP_ID}
+  REVERB_APP_KEY: ${REVERB_APP_KEY:?Falta REVERB_APP_KEY}
+  REVERB_APP_SECRET: ${REVERB_APP_SECRET:?Falta REVERB_APP_SECRET}
+  # Laravel publica eventos directamente por la red privada realtime.
+  REVERB_HOST: reverb
+  REVERB_PORT: "8080"
+  REVERB_SCHEME: http
+  REVERB_SERVER_HOST: 0.0.0.0
+  REVERB_SERVER_PORT: "8080"
+  REVERB_APP_MAX_CONNECTIONS: ${REVERB_APP_MAX_CONNECTIONS:-500}
+  REVERB_APP_RATE_LIMITING_ENABLED: "true"
+  # Las citas cambian mediante Laravel autenticado; el navegador no puede emitir eventos arbitrarios.
+  REVERB_APP_ACCEPT_CLIENT_EVENTS_FROM: none
   FILESYSTEM_DISK: local
   MAIL_MAILER: resend
   RESEND_KEY: ${RESEND_KEY:?Falta RESEND_KEY}
@@ -57,6 +71,12 @@ x-app: &app
     context: .
     dockerfile: Dockerfile
     target: app
+    args:
+      # La key es publica; REVERB_APP_SECRET nunca entra en el build.
+      VITE_REVERB_APP_KEY: ${REVERB_APP_KEY:?Falta REVERB_APP_KEY}
+      VITE_REVERB_HOST: ${APP_DOMAIN}
+      VITE_REVERB_PORT: "443"
+      VITE_REVERB_SCHEME: https
   pull_policy: never
   cgroup_parent: project-${COMPOSE_PROJECT_NAME:-laravel}.slice
   user: "10001:10001"
@@ -95,6 +115,11 @@ services:
       edge: {ipv4_address: 172.30.91.3}
       data: {}
       outbound: {}
+      realtime: {}
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      reverb: {condition: service_healthy}
     healthcheck:
       test: [CMD, php, /app/docker/health.php]
       interval: 10s
@@ -105,12 +130,24 @@ services:
   queue:
     <<: *app
     command: [queue]
-    networks: [data, outbound]
+    networks: [data, outbound, realtime]
 
   scheduler:
     <<: *app
     command: [scheduler]
-    networks: [data, outbound]
+    networks: [data, outbound, realtime]
+
+  reverb:
+    <<: *app
+    command: [reverb]
+    # data permite leer la señal de reverb:restart almacenada en Redis.
+    networks: [data, realtime]
+    healthcheck:
+      test: [CMD, php, /app/docker/reverb-health.php]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
 
   postgres:
     image: ${POSTGRES_IMAGE:-postgres:18-bookworm}
@@ -199,6 +236,8 @@ networks:
     ipam:
       config: [{subnet: 172.30.91.0/29}]
   data:
+    internal: true
+  realtime:
     internal: true
   outbound: {}
   tunnel_outbound: {}

@@ -90,6 +90,10 @@ DB_USERNAME=laravel
 DB_PASSWORD='$(openssl rand -hex 32)'
 POSTGRES_PASSWORD='$(openssl rand -hex 32)'
 REDIS_PASSWORD='$(openssl rand -hex 32)'
+REVERB_APP_ID='$(openssl rand -hex 8)'
+REVERB_APP_KEY='$(openssl rand -hex 16)'
+REVERB_APP_SECRET='$(openssl rand -hex 32)'
+REVERB_APP_MAX_CONNECTIONS=500
 RESEND_KEY='$RESEND_KEY'
 MAIL_FROM_ADDRESS='$MAIL_FROM_ADDRESS'
 FILAMENT_ADMIN_EMAIL='$FILAMENT_ADMIN_EMAIL'
@@ -100,6 +104,23 @@ CLOUDFLARED_IMAGE=cloudflare/cloudflared:latest
 EOF
     mv -- "$temporary_env" .env
     unset RESEND_KEY TUNNEL_TOKEN
+fi
+# Actualiza instalaciones existentes sin mostrar ni reemplazar secretos validos.
+ensure_generated_env() {
+    local key=$1 value=$2 existing
+    existing=$(sed -n "s/^${key}=//p" .env | tail -n 1)
+    case "$existing" in
+        ''|"''"|'""')
+            sed -i "/^${key}=/d" .env
+            printf "%s='%s'\n" "$key" "$value" >> .env
+            ;;
+    esac
+}
+ensure_generated_env REVERB_APP_ID "$(openssl rand -hex 8)"
+ensure_generated_env REVERB_APP_KEY "$(openssl rand -hex 16)"
+ensure_generated_env REVERB_APP_SECRET "$(openssl rand -hex 32)"
+if ! grep -q '^REVERB_APP_MAX_CONNECTIONS=' .env; then
+    printf 'REVERB_APP_MAX_CONNECTIONS=500\n' >> .env
 fi
 chmod 0600 .env
 # No ejecutar .env como codigo Bash. Compose interpreta su formato.
@@ -157,7 +178,7 @@ fi
 dc=("${base[@]}" -f compose.images.yml)
 "${dc[@]}" --profile ops config --quiet
 "${dc[@]}" pull postgres redis cloudflared
-# Construir una vez: app, release, queue y scheduler reutilizan esta misma imagen.
+# Construir una vez: web, Reverb, release, queue y scheduler reutilizan la imagen.
 build_args=()
 [[ ${1:-} == --refresh-images ]] && build_args+=(--pull)
 "${dc[@]}" build "${build_args[@]}" app
@@ -166,8 +187,9 @@ build_args=()
 
 # Una sola migracion por VPS, antes de iniciar el codigo nuevo.
 # Requiere cambios de esquema compatibles con la version web anterior.
-"${dc[@]}" stop queue scheduler
+"${dc[@]}" stop queue scheduler reverb
 "${dc[@]}" run --rm --no-deps -T release
+"${dc[@]}" up -d --no-deps --wait --wait-timeout 120 reverb
 "${dc[@]}" up -d --no-deps --wait --wait-timeout 120 app
 "${dc[@]}" up -d --no-deps queue scheduler cloudflared
 

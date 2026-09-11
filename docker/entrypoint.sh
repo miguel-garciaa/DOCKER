@@ -4,7 +4,7 @@ umask 027
 mkdir -p /tmp/config /tmp/data storage/framework/views storage/framework/sessions \
   storage/framework/cache/data storage/logs bootstrap/cache
 case "${1:-web}" in
-  web|queue|scheduler)
+  web|queue|scheduler|reverb)
     php artisan config:cache --no-interaction
     php artisan route:cache --no-interaction
     php artisan view:cache --no-interaction
@@ -23,5 +23,8 @@ case "${1:-web}" in
       --timeout=60 --max-time=3600 --memory=256 --no-interaction
     ;;
   scheduler) exec php artisan schedule:work --no-interaction ;;
+  reverb)
+    exec php artisan reverb:start --host=0.0.0.0 --port=8080 --no-interaction
+    ;;
   *) exec "$@" ;;
 esac

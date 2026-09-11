@@ -36,6 +36,10 @@ FROM dependencies AS frontend
 # Wayfinder genera rutas TypeScript ejecutando `php artisan` durante el build,
 # por lo que esta etapa necesita PHP y Node 24 en el mismo entorno.
 COPY --from=node-bin /usr/local/ /usr/local/
+ARG VITE_REVERB_APP_KEY
+ARG VITE_REVERB_HOST
+ARG VITE_REVERB_PORT=443
+ARG VITE_REVERB_SCHEME=https
 # Instala tambien devDependencies: Vite, TypeScript y Tailwind viven normalmente ahi.
 RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
 RUN npm run build

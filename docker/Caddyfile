@@ -40,6 +40,10 @@ http://:8000 {
         # Impide ejecutar PHP subido; el rewrite al worker sucede despues.
         @script path_regexp script (?i)\.(php[0-9]?|phtml|phar)(/|$)
         respond @script 404
+        # Caddy gestiona automaticamente Upgrade/Connection para WebSocket.
+        # /apps permanece interno: Laravel publica directamente a reverb:8080.
+        @reverb path /app /app/*
+        reverse_proxy @reverb reverb:8080
         header {
             -Server
             -X-Powered-By

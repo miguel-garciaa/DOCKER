@@ -8,15 +8,15 @@ Visitante --HTTPS--> Cloudflare --tunel cifrado--> cloudflared
                                         HTTP por red Docker privada
                                                      |
                                           FrankenPHP/Caddy :8000
-                                                     |
-                                              Laravel Octane
-                                                /         \
-                                         PostgreSQL 18   Redis 8
+                                               /           \
+                                      Laravel Octane    Reverb :8080
+                                         /       \
+                                 PostgreSQL 18  Redis 8
 
-queue / scheduler: misma imagen y datos de la aplicacion, procesos independientes.
+queue / scheduler / Reverb: misma imagen, procesos independientes.
 ```
 
-El repositorio incluye una aplicacion Laravel 13 completa basada en el starter oficial de React: React 19, TypeScript, Inertia 3, Tailwind 4, autenticacion, Octane, Filament 5 y Resend. Tambien contiene el build de produccion y los servicios Docker. No usa Vercel, GitHub Actions ni un registry para desplegar.
+El repositorio incluye una aplicacion Laravel 13 completa basada en el starter oficial de React: React 19, TypeScript, Inertia 3, Tailwind 4, autenticacion, Octane, Filament 5, Resend y Laravel Reverb para WebSockets. Tambien contiene el build de produccion y los servicios Docker. No usa Vercel, GitHub Actions ni un registry para desplegar.
 
 ## Sistema base y frontend
 
@@ -74,8 +74,8 @@ composer.lock / package-lock.json
 docker/
   Caddyfile                      # HTTP interno, assets y Octane
   php.ini
-  entrypoint.sh                  # web, queue y scheduler
-  health.php / check-services.php
+  entrypoint.sh                  # web, queue, scheduler y Reverb
+  health.php / reverb-health.php / check-services.php
   postgres-init.sh / redis-start.sh
   project-limits.sh              # presupuesto CPU/RAM/swap mediante systemd
 ```
@@ -92,7 +92,7 @@ Este comando ejecuta tests, Pint, PHPStan, comprobaciones TypeScript, formato y 
 
 ## Construccion local
 
-`deploy.sh` construye en el VPS una unica imagen local llamada `laravel-app:local`. Los servicios web, migraciones, colas y scheduler reutilizan exactamente esa imagen; Node, npm, Composer y las dependencias de compilacion no quedan en la etapa final.
+`deploy.sh` construye en el VPS una unica imagen local llamada `laravel-app:local`. Los servicios web, Reverb, migraciones, colas y scheduler reutilizan exactamente esa imagen; Node, npm, Composer y las dependencias de compilacion no quedan en la etapa final.
 
 Para construir sin desplegar:
 
@@ -121,6 +121,12 @@ El firewall del proveedor debe permitir SSH solo desde tus IP/VPN y bloquear el 
 
 Cada app con datos independientes debe tener su propio tunel. Reutilizar un token en varios VPS los convierte en replicas del mismo tunel: podrian recibir trafico indistintamente. No hacerlo con bases de datos independientes. Esta plantilla contempla una aplicacion por VPS. Si alojas varias, asigna nombres y subredes diferentes y ajusta simultaneamente Caddy y TrustProxies.
 
+### WebSockets con Laravel Reverb
+
+No hace falta crear otra ruta en Cloudflare. El navegador abre `wss://APP_DOMAIN/app/...` por el mismo hostname; Caddy envia solo `/app` al servicio `reverb:8080`. El endpoint interno `/apps`, usado por Laravel para publicar eventos, no se expone directamente. Reverb solo acepta el origen configurado en `APP_DOMAIN`, rechaza eventos enviados directamente por el navegador, tiene healthcheck, un maximo inicial de 500 conexiones y comparte el presupuesto de CPU/RAM/swap del proyecto.
+
+Los cambios de calendario o citas deben entrar por controladores Laravel autenticados y autorizados; despues, los eventos que implementan `ShouldBroadcast` se procesan por el worker de Redis existente. Autoriza cada canal privado en `routes/channels.php`; un usuario nunca debe poder suscribirse al calendario o citas de otra cuenta. En React estan disponibles `useEcho`, `useEchoPublic`, `useEchoPresence` y los demas hooks de `@laravel/echo-react`. Consulta la [documentacion oficial de broadcasting](https://laravel.com/docs/13.x/broadcasting) y [Laravel Reverb](https://laravel.com/docs/13.x/reverb).
+
 ## Desplegar: un comando
 
 En un VPS Ubuntu 26.04 LTS nuevo (tambien admite 24.04), clona este repositorio completo, entra en su directorio y ejecuta:
@@ -140,7 +146,7 @@ PROJECT_MEMORY=6G
 PROJECT_SWAP=1G
 ```
 
-Es un **techo compartido** de 6 GiB de RAM y 1 GiB adicional de swap para app, PostgreSQL, Redis, queue, scheduler, cloudflared y migraciones. No reserva RAM ni nucleos fisicos. Cada servicio puede usar CPU disponible, pero todos juntos quedan limitados al tiempo de CPU equivalente a cuatro nucleos. Los limites se aplican a todos los procesos hijos y a la memoria contabilizada por cgroups, incluidos tmpfs y cache de archivos imputada al grupo. El SO, daemon Docker y la construccion BuildKit quedan fuera de este presupuesto.
+Es un **techo compartido** de 6 GiB de RAM y 1 GiB adicional de swap para app, Reverb, PostgreSQL, Redis, queue, scheduler, cloudflared y migraciones. No reserva RAM ni nucleos fisicos. Cada servicio puede usar CPU disponible, pero todos juntos quedan limitados al tiempo de CPU equivalente a cuatro nucleos. Los limites se aplican a todos los procesos hijos y a la memoria contabilizada por cgroups, incluidos tmpfs y cache de archivos imputada al grupo. El SO, daemon Docker y la construccion BuildKit quedan fuera de este presupuesto.
 
 `deploy.sh` crea `project-laravel.slice` en systemd con `CPUQuota=400%`, `MemoryMax=6G` y `MemorySwapMax=1G`; todos los servicios utilizan el mismo `cgroup_parent`. Si el host no tiene al menos 1 GiB de swap, crea `/var/lib/laravel-docker/swapfile`, lo activa y lo registra en `/etc/fstab`. Comprueba los valores efectivos del kernel y la pertenencia de los contenedores al grupo. Requiere Docker rootful, driver systemd y cgroups v2; se detiene si no se cumplen. La unidad se conserva tras reiniciar el VPS. Referencias: [cgroup_parent en Compose](https://docs.docker.com/reference/compose-file/services/#cgroup_parent) y [control de recursos de systemd](https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html).
 
@@ -171,7 +177,7 @@ Con la configuracion inicial, `memory.max` debe ser `6442450944`, `memory.swap.m
 
 El primer uso pide dominio y remitente, y solicita `RESEND_KEY`/`TUNNEL_TOKEN` con entrada oculta. Genera `APP_KEY` y passwords aleatorios; los guarda en `.env` con permisos 600 para reinicios y siguientes deploys. Para ejecucion no interactiva, provisiona previamente un `.env` completo mediante tu gestor de secretos. **No borres ni regeneres este archivo en cada despliegue.**
 
-El script instala Docker CE y Compose mediante APT firmado si faltan, descarga imagenes, fija las de infraestructura en `compose.images.yml`, espera PostgreSQL/Redis, valida conexiones de Laravel, detiene workers, ejecuta una migracion y recrea la app/colas/scheduler. Comprueba `/up`, la conexion de cloudflared y `/up` por el dominio publico. El endpoint `/up` debe poder devolver 200 al monitor, sin un challenge o login de Access; si proteges toda la aplicacion, adapta el monitor con autenticacion de servicio.
+El script instala Docker CE y Compose mediante APT firmado si faltan, descarga imagenes, fija las de infraestructura en `compose.images.yml`, espera PostgreSQL/Redis, valida conexiones de Laravel, detiene workers/Reverb, ejecuta una migracion y recrea Reverb/app/colas/scheduler. Comprueba healthchecks, `/up`, la conexion de cloudflared y `/up` por el dominio publico. El endpoint `/up` debe poder devolver 200 al monitor, sin un challenge o login de Access; si proteges toda la aplicacion, adapta el monitor con autenticacion de servicio.
 
 `TUNNEL_TOKEN` solo se inyecta en cloudflared. No se imprime ni se pasa por `--token` en la lista de procesos. `.env` y variables Docker son accesibles a root/administradores Docker: no son un vault. La [opcion token-file](https://developers.cloudflare.com/tunnel/reference/run-parameters/) permite evolucionar a un secreto montado cuando dispongas de un gestor.
 
@@ -208,7 +214,7 @@ sudo -i
 cd /opt/miapp
 dc() { docker compose --env-file .env -f docker-compose.yml -f compose.images.yml "$@"; }
 dc ps
-dc logs --tail=100 app queue scheduler cloudflared
+dc logs --tail=100 app reverb queue scheduler cloudflared
 docker stats --no-stream
 dc exec app php artisan make:filament-user
 ```
@@ -256,6 +262,6 @@ dc exec -T postgres sh -c \
 
 Haz tambien backups de uploads y una copia cifrada de secretos/APP_KEY y digests. Programa copia cifrada **fuera del VPS**, retencion y restauraciones de prueba; define RPO/RTO. Para recuperacion a un instante concreto, añade backup fisico/WAL de PostgreSQL con una herramienta dedicada. Esta plantilla no configura un proveedor de backup que no has indicado.
 
-Prueba en un VPS de staging: primer arranque, segundo deploy sobre los mismos volumenes, login/CSRF y URLs HTTPS, IP real y limites de acceso, assets Vite/Filament, upload privado/publico, envio Resend en cola, scheduler, reinicio del host, recuperacion de Redis/PostgreSQL y restauracion de backup. Comprueba que no hay puertos publicados con `docker ps` y el firewall del proveedor. Si la subred 172.30.91.0/29 colisiona con rutas de tu host/VPN, cambiala coherentemente en Compose, Caddy y TrustProxies antes de arrancar.
+Prueba en un VPS de staging: primer arranque, segundo deploy sobre los mismos volumenes, login/CSRF y URLs HTTPS, IP real y limites de acceso, assets Vite/Filament, canales privados y reconexion WebSocket, upload privado/publico, envio Resend en cola, scheduler, reinicio del host, recuperacion de Redis/PostgreSQL y restauracion de backup. Comprueba que no hay puertos publicados con `docker ps` y el firewall del proveedor. Si la subred 172.30.91.0/29 colisiona con rutas de tu host/VPN, cambiala coherentemente en Compose, Caddy y TrustProxies antes de arrancar.
 
 Mide la misma app y datos, PHP/motor/version/workers equivalentes, misma carga y cache caliente/fria: throughput, errores, p50/p95/p99, RSS por proceso, CPU e I/O de BD. Compara primero acceso interno para aislar el origen y despues el dominio Cloudflare. No atribuyas a Docker un cambio causado por pasar de Swoole/RoadRunner a FrankenPHP o por cambiar de hardware.
