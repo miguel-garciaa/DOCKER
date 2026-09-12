@@ -1,6 +1,7 @@
 {
     auto_https off
     admin 127.0.0.1:2019
+    metrics
     servers {
         timeouts {
             read_header 10s
@@ -30,6 +31,14 @@ http://:8000 {
         }
     }
     route {
+        @prometheus_metrics {
+            path /internal/metrics
+            remote_ip 172.30.92.3
+        }
+        metrics @prometheus_metrics
+        @blocked_metrics path /internal/metrics
+        respond @blocked_metrics 404
+
         # Solo el balanceador interno y healthchecks locales.
         @untrusted not remote_ip 127.0.0.1 ::1 172.30.92.2
         respond @untrusted 403

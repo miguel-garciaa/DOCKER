@@ -1,7 +1,8 @@
 <?php
 
 // Solo comprueba el arranque HTTP. El deploy comprueba BD/Redis por separado.
-$curl = curl_init('http://127.0.0.1:8000/up');
+$url = getenv('HEALTH_URL') ?: 'http://127.0.0.1:8000/up';
+$curl = curl_init($url);
 curl_setopt_array($curl, [
     CURLOPT_HTTPHEADER => ['Host: '.getenv('APP_DOMAIN')],
     CURLOPT_RETURNTRANSFER => true,

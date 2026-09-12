@@ -14,6 +14,7 @@ Visitante --HTTPS--> Cloudflare --tunel cifrado--> cloudflared
                                   PostgreSQL 18 + Redis 8
 
 app-1 / app-2 / gateway / queue / scheduler / Reverb reutilizan la misma imagen.
+Prometheus guarda metricas; cAdvisor mide los contenedores; Grafana las consulta por el tunel.
 ```
 
 El repositorio incluye una aplicacion Laravel 13 completa basada en el starter oficial de React: React 19, TypeScript, Inertia 3, Tailwind 4, autenticacion, Octane, Filament 5, Resend y Laravel Reverb para WebSockets. Puede construirse en el VPS o publicarse manualmente como imagen OCI con Buildx. No usa Vercel ni GitHub Actions.
@@ -58,7 +59,7 @@ Recomiendo FrankenPHP para este caso por su servidor HTTP integrado y la imagen 
 
 Caddy mantiene limites de cuerpo/cabeceras, timeouts, bloqueo de dotfiles y PHP directo, cabeceras basicas y restriccion de host. Un gateway Caddy interno recibe exclusivamente desde cloudflared y balancea las replicas Laravel.
 
-**Un contenedor no corrige XSS, IDOR, SQL injection ni fallos de autorizacion.** Comparte kernel con el host y no es una frontera equivalente a otra VM. Aqui no hay puertos publicados, Docker socket, modo privilegiado ni usuarios root en los servicios. `cloudflared` puede llegar a la app, pero no pertenece a la red de PostgreSQL/Redis. La app conserva salida a Internet para Resend y APIs: la separacion de redes no es un firewall de salida completo. El usuario con acceso al daemon Docker tiene privilegios elevados sobre el host.
+**Un contenedor no corrige XSS, IDOR, SQL injection ni fallos de autorizacion.** Comparte kernel con el host y no es una frontera equivalente a otra VM. No hay puertos publicados y los servicios de aplicacion se ejecutan sin root, capacidades Linux ni privilegios adicionales. cAdvisor es la excepcion: para medir todos los contenedores necesita acceso privilegiado de solo lectura a cgroups, `/var/lib/docker`, `/var/run` y otros datos del host. Por eso solo pertenece a la red interna de monitorizacion y no queda accesible desde Cloudflare. `cloudflared` tampoco pertenece a la red de PostgreSQL/Redis. La app conserva salida a Internet para Resend y APIs: la separacion de redes no es un firewall de salida completo. El usuario con acceso al daemon Docker tiene privilegios elevados sobre el host.
 
 ## Archivos
 
@@ -75,6 +76,8 @@ composer.lock / package-lock.json
 docker/
   Caddyfile                      # HTTP interno, assets y Octane
   Gateway.Caddyfile             # balanceo app-1/app-2 y entrada a Reverb
+  MetricsGateway.Caddyfile      # autenticacion y acceso remoto a Prometheus
+  prometheus/                   # scrapes y reglas de alerta
   php.ini
   entrypoint.sh                  # web, queue, scheduler y Reverb
   health.php / reverb-health.php / check-services.php
@@ -164,6 +167,51 @@ Los cambios de calendario o citas deben entrar por controladores Laravel autenti
 
 Esto da continuidad cuando cae un proceso `app`; no es alta disponibilidad completa. Gateway, Reverb, Redis, PostgreSQL, cloudflared y el propio VPS siguen siendo puntos unicos. Cubrir la perdida del VPS exige al menos otro host, varios conectores del tunel y servicios de datos replicados. Caddy soporta balanceo, reintentos y comprobacion pasiva de fallos; las replicas de Compose se controlan mediante `scale`. Referencias: [reverse_proxy de Caddy](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy) y [scale en Compose](https://docs.docker.com/reference/compose-file/services/#scale).
 
+### Prometheus y Grafana
+
+Prometheus conserva las series temporales en el volumen `prometheus_data`. cAdvisor recoge uso de CPU, memoria, red y disco de cada contenedor. El gateway y cada replica Caddy exponen internamente contadores HTTP, errores y histogramas de latencia; `/internal/metrics` se bloquea para visitantes y solo acepta al Prometheus de la red privada. La configuracion inicial consulta cada 15 segundos y retiene como maximo 15 dias o 5 GB, lo que ocurra primero.
+
+En Cloudflare añade una segunda ruta al mismo tunel:
+
+```text
+Hostname:  metrics.tudominio.com
+Service:   http://metrics:9090
+```
+
+`metrics` es el alias privado del proxy autenticado, no el contenedor Prometheus. No publiques `9090` en el host. El primer despliegue actualizado propone `PROMETHEUS_DOMAIN=metrics.comput.uk` para `comput.uk`, usa el usuario `grafana` y solicita una contrasena de 20 a 64 caracteres. Solo guarda su hash bcrypt en `.env` y en el archivo generado `.prometheus-auth.caddy`; conserva la contrasena para configurar Grafana.
+
+En la VM de Grafana crea un datasource **Prometheus** con:
+
+```text
+URL:        https://metrics.tudominio.com
+Basic auth: activado
+Usuario:    grafana
+Password:   la introducida durante deploy.sh
+```
+
+Puedes reforzarlo con Cloudflare Access. En ese caso crea un Service Token para Grafana y envia `CF-Access-Client-Id` y `CF-Access-Client-Secret` como cabeceras del datasource. Las reglas iniciales detectan targets caidos, menos de dos replicas Laravel, eventos OOM y errores de evaluacion. Grafana Alerting puede consultar este datasource y enviar notificaciones; no se incluye Alertmanager hasta que quieras administrar alertas desde Prometheus independientemente de Grafana.
+
+Consultas PromQL utiles, filtradas por el proyecto `laravel`:
+
+```promql
+# CPU usada por servicio, en nucleos
+sum by (container_label_com_docker_compose_service) (
+  rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_project="laravel",image!=""}[5m])
+)
+
+# RAM efectiva por servicio
+sum by (container_label_com_docker_compose_service) (
+  container_memory_working_set_bytes{container_label_com_docker_compose_project="laravel",image!=""}
+)
+
+# Latencia HTTP p95 del gateway
+histogram_quantile(0.95,
+  sum by (le) (rate(caddy_http_request_duration_seconds_bucket{job="caddy-gateway"}[5m]))
+)
+```
+
+Prometheus 3.13 es la rama LTS y se usa la variante distroless. cAdvisor sigue la imagen oficial de GHCR. Referencias: [instalacion de Prometheus en Docker](https://prometheus.io/docs/prometheus/latest/installation/), [metricas de Caddy](https://caddyserver.com/docs/metrics), [cAdvisor](https://github.com/google/cadvisor) y [rutas publicadas de Cloudflare Tunnel](https://developers.cloudflare.com/tunnel/concepts/routing/).
+
 ## Desplegar
 
 Desde un clon del repositorio, en Ubuntu 26.04 LTS o 24.04:
@@ -172,7 +220,7 @@ Desde un clon del repositorio, en Ubuntu 26.04 LTS o 24.04:
 sudo bash ./deploy.sh
 ```
 
-Para desplegar la imagen sin clonar Laravel, primero instala Docker, descarga la release y extrae unicamente los cinco archivos pequenos incluidos en `/opt/laravel-deploy`:
+Para desplegar la imagen sin clonar Laravel, primero instala Docker, descarga la release y extrae el paquete minimo incluido en `/opt/laravel-deploy`:
 
 ```bash
 APP_IMAGE='ghcr.io/miguel-garciaa/docker:v1.0.0'
@@ -203,7 +251,7 @@ APP_REPLICAS=2
 QUEUE_REPLICAS=1
 ```
 
-Es un **techo compartido** de 6 GiB de RAM y 1 GiB adicional de swap para las dos apps, gateway, Reverb, PostgreSQL, Redis, queue, scheduler, cloudflared y migraciones. No reserva RAM ni nucleos fisicos. Cada servicio puede usar CPU disponible, pero todos juntos quedan limitados al tiempo de CPU equivalente a cuatro nucleos. Los limites se aplican a todos los procesos hijos y a la memoria contabilizada por cgroups, incluidos tmpfs y cache de archivos imputada al grupo. El SO, daemon Docker y la construccion BuildKit quedan fuera de este presupuesto.
+Es un **techo compartido** de 6 GiB de RAM y 1 GiB adicional de swap para las dos apps, gateways, Reverb, PostgreSQL, Redis, queue, scheduler, cloudflared, Prometheus, cAdvisor y migraciones. No reserva RAM ni nucleos fisicos. Cada servicio puede usar CPU disponible, pero todos juntos quedan limitados al tiempo de CPU equivalente a cuatro nucleos. Los limites se aplican a todos los procesos hijos y a la memoria contabilizada por cgroups, incluidos tmpfs y cache de archivos imputada al grupo. El SO, daemon Docker y la construccion BuildKit quedan fuera de este presupuesto.
 
 `deploy.sh` crea `project-laravel.slice` en systemd con `CPUQuota=400%`, `MemoryMax=6G` y `MemorySwapMax=1G`; todos los servicios utilizan el mismo `cgroup_parent`. Si el host no tiene al menos 1 GiB de swap, crea `/var/lib/laravel-docker/swapfile`, lo activa y lo registra en `/etc/fstab`. Comprueba los valores efectivos del kernel y la pertenencia de los contenedores al grupo. Requiere Docker rootful, driver systemd y cgroups v2; se detiene si no se cumplen. La unidad se conserva tras reiniciar el VPS. Referencias: [cgroup_parent en Compose](https://docs.docker.com/reference/compose-file/services/#cgroup_parent) y [control de recursos de systemd](https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html).
 
@@ -232,9 +280,9 @@ systemd-cgtop
 
 Con la configuracion inicial, `memory.max` debe ser `6442450944`, `memory.swap.max` debe ser `1073741824` y el cociente cuota/periodo de `cpu.max` debe ser 4 (normalmente `400000 100000`). `docker stats` por contenedor no expresa por si solo este techo agregado. Si creas otro servicio o replicas uno existente, debe conservar el mismo `cgroup_parent` para quedar incluido. Ejecutar Compose sin haber preparado la slice no garantiza que haya limite: utiliza `deploy.sh`.
 
-El primer uso pide dominio y remitente, y solicita `RESEND_KEY`/`TUNNEL_TOKEN` con entrada oculta. Genera `APP_KEY` y passwords aleatorios; los guarda en `.env` con permisos 600 para reinicios y siguientes deploys. Para ejecucion no interactiva, provisiona previamente un `.env` completo mediante tu gestor de secretos. **No borres ni regeneres este archivo en cada despliegue.**
+El primer uso pide dominio, remitente y una contrasena para el acceso Grafana-Prometheus, y solicita `RESEND_KEY`/`TUNNEL_TOKEN` con entrada oculta. Genera `APP_KEY`, passwords internos y el hash bcrypt de Prometheus; los guarda en `.env` con permisos 600 para reinicios y siguientes deploys. La contrasena de Prometheus no se guarda y debes conservarla en tu gestor. Para ejecucion no interactiva, provisiona previamente un `.env` completo mediante tu gestor de secretos. **No borres ni regeneres este archivo en cada despliegue.**
 
-El script instala Docker CE y Compose mediante APT firmado si faltan, construye la app o descarga `APP_IMAGE`, fija las imagenes de infraestructura en `compose.images.yml`, espera PostgreSQL/Redis, valida conexiones de Laravel, detiene workers/Reverb, ejecuta una migracion y recrea Reverb, las dos apps, gateway, cola y scheduler. Comprueba healthchecks, `/up`, la conexion de cloudflared y `/up` por el dominio publico. El endpoint `/up` debe poder devolver 200 al monitor, sin un challenge o login de Access; si proteges toda la aplicacion, adapta el monitor con autenticacion de servicio.
+El script instala Docker CE y Compose mediante APT firmado si faltan, construye la app o descarga `APP_IMAGE`, fija las imagenes de infraestructura en `compose.images.yml`, valida Prometheus, espera PostgreSQL/Redis, valida conexiones de Laravel, ejecuta una migracion y recrea Reverb, las dos apps, gateways, Prometheus, cAdvisor, cola y scheduler. Comprueba healthchecks, `/up`, la conexion de cloudflared y `/up` por el dominio publico. El endpoint `/up` debe poder devolver 200 al monitor, sin un challenge o login de Access; si proteges toda la aplicacion, adapta el monitor con autenticacion de servicio.
 
 `TUNNEL_TOKEN` solo se inyecta en cloudflared. No se imprime ni se pasa por `--token` en la lista de procesos. `.env` y variables Docker son accesibles a root/administradores Docker: no son un vault. La [opcion token-file](https://developers.cloudflare.com/tunnel/reference/run-parameters/) permite evolucionar a un secreto montado cuando dispongas de un gestor.
 
@@ -271,7 +319,7 @@ sudo -i
 cd /opt/miapp
 dc() { docker compose --env-file .env -f docker-compose.yml -f compose.images.yml "$@"; }
 dc ps
-dc logs --tail=100 gateway app reverb queue scheduler cloudflared
+dc logs --tail=100 gateway metrics-gateway prometheus cadvisor app reverb queue scheduler cloudflared
 docker stats --no-stream
 dc exec app php artisan make:filament-user
 ```
@@ -319,6 +367,6 @@ dc exec -T postgres sh -c \
 
 Haz tambien backups de uploads y una copia cifrada de secretos/APP_KEY y digests. Programa copia cifrada **fuera del VPS**, retencion y restauraciones de prueba; define RPO/RTO. Para recuperacion a un instante concreto, añade backup fisico/WAL de PostgreSQL con una herramienta dedicada. Esta plantilla no configura un proveedor de backup que no has indicado.
 
-Prueba en un VPS de staging: primer arranque, segundo deploy sobre los mismos volumenes, reparto entre replicas, parada manual de `laravel-app-1`, login/CSRF y URLs HTTPS, IP real y limites de acceso, assets Vite/Filament, canales privados y reconexion WebSocket, upload privado/publico, envio Resend en cola, scheduler, reinicio del host, recuperacion de Redis/PostgreSQL y restauracion de backup. Comprueba que no hay puertos publicados con `docker ps` y el firewall del proveedor. Si las subredes 172.30.91.0/29 o 172.30.92.0/29 colisionan con rutas de tu host/VPN, cambialas coherentemente en Compose, ambos Caddyfile y TrustProxies antes de arrancar.
+Prueba en un VPS de staging: primer arranque, segundo deploy sobre los mismos volumenes, reparto entre replicas, parada manual de `laravel-app-1`, login/CSRF y URLs HTTPS, IP real y limites de acceso, assets Vite/Filament, canales privados y reconexion WebSocket, upload privado/publico, envio Resend en cola, scheduler, targets de Prometheus, acceso autenticado desde Grafana, reinicio del host, recuperacion de Redis/PostgreSQL y restauracion de backup. Comprueba que no hay puertos publicados con `docker ps` y el firewall del proveedor. Si las subredes 172.30.91.0/29, 172.30.92.0/29 o 172.30.93.0/28 colisionan con rutas de tu host/VPN, cambialas coherentemente en Compose, los Caddyfile y TrustProxies antes de arrancar.
 
 Mide la misma app y datos, PHP/motor/version/workers equivalentes, misma carga y cache caliente/fria: throughput, errores, p50/p95/p99, RSS por proceso, CPU e I/O de BD. Compara primero acceso interno para aislar el origen y despues el dominio Cloudflare. No atribuyas a Docker un cambio causado por pasar de Swoole/RoadRunner a FrankenPHP o por cambiar de hardware.

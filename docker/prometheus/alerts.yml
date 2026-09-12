@@ -1,0 +1,36 @@
+groups:
+  - name: infrastructure
+    rules:
+      - alert: MetricsTargetDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus no puede consultar {{ $labels.job }}"
+          description: "El target {{ $labels.instance }} lleva al menos 2 minutos sin responder."
+
+      - alert: ContainerOomDetected
+        expr: increase(container_oom_events_total{container_label_com_docker_compose_project!=""}[10m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Un contenedor ha sufrido un OOM"
+          description: "Revisa memoria, swap y logs del servicio {{ $labels.container_label_com_docker_compose_service }}."
+
+      - alert: LaravelReplicaCapacityLow
+        expr: count(up{job="caddy-app"} == 1) < 2
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Hay menos de dos replicas Laravel disponibles"
+          description: "Comprueba app-1, app-2, sus healthchecks y el balanceador."
+
+      - alert: PrometheusRuleEvaluationFailures
+        expr: increase(prometheus_rule_evaluation_failures_total[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prometheus no puede evaluar alguna regla"
+          description: "Comprueba las reglas y los logs de Prometheus."

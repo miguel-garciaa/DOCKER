@@ -64,10 +64,34 @@ ask() {
         || fail "Valor vacio o formato no admitido: $name"
     printf -v "$name" '%s' "$value"
 }
+ask_prometheus_password() {
+    read -r -s -p 'Contrasena de Grafana para Prometheus (20-64 caracteres): ' prometheus_plain_password </dev/tty
+    printf '\n' >/dev/tty
+    ((${#prometheus_plain_password} >= 20 && ${#prometheus_plain_password} <= 64)) \
+        || fail 'La contrasena de Prometheus debe tener entre 20 y 64 caracteres'
+}
+read_env_value() {
+    local key=$1 raw
+    raw=$(sed -n "s/^${key}=//p" .env | tail -n 1)
+    case "$raw" in
+        \'*\') raw=${raw:1:${#raw}-2} ;;
+        \"*\") raw=${raw:1:${#raw}-2} ;;
+    esac
+    printf '%s' "$raw"
+}
+write_prometheus_auth_file() {
+    local username=$1 password_hash=$2 temporary_auth
+    temporary_auth=$(mktemp .prometheus-auth.caddy.tmp.XXXXXX)
+    printf '%s %s\n' "$username" "$password_hash" > "$temporary_auth"
+    chown 10001:10001 "$temporary_auth"
+    chmod 0400 "$temporary_auth"
+    mv -- "$temporary_auth" .prometheus-auth.caddy
+}
 valid_app_image() {
     [[ $1 =~ ^[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|@sha256:[a-f0-9]{64})$ ]]
 }
 requested_app_image=${APP_IMAGE:-}
+prometheus_plain_password=''
 [[ -z $requested_app_image ]] || valid_app_image "$requested_app_image" \
     || fail 'APP_IMAGE no es una referencia OCI valida; usa registry/ruta:tag o registry/ruta@sha256:digest'
 if [[ ! -f .env ]]; then
@@ -81,6 +105,7 @@ if [[ ! -f .env ]]; then
         || fail 'Email de administrador invalido'
     ask RESEND_KEY 'RESEND_KEY' true
     ask TUNNEL_TOKEN 'TUNNEL_TOKEN' true
+    ask_prometheus_password
     temporary_env=$(mktemp .env.tmp.XXXXXX)
     cat > "$temporary_env" <<EOF
 COMPOSE_PROJECT_NAME=laravel
@@ -93,6 +118,11 @@ APP_KEY='base64:$(openssl rand -base64 32)'
 OCTANE_WORKERS=2
 APP_REPLICAS=2
 QUEUE_REPLICAS=1
+PROMETHEUS_DOMAIN='metrics.$APP_DOMAIN'
+PROMETHEUS_USERNAME=grafana
+PROMETHEUS_PASSWORD_HASH=
+PROMETHEUS_RETENTION_TIME=15d
+PROMETHEUS_RETENTION_SIZE=5GB
 DB_DATABASE=laravel
 DB_USERNAME=laravel
 DB_PASSWORD='$(openssl rand -hex 32)'
@@ -109,6 +139,8 @@ TUNNEL_TOKEN='$TUNNEL_TOKEN'
 POSTGRES_IMAGE=postgres:18-bookworm
 REDIS_IMAGE=redis:8-bookworm
 CLOUDFLARED_IMAGE=cloudflare/cloudflared:latest
+PROMETHEUS_IMAGE=prom/prometheus:v3.13.3-distroless
+CADVISOR_IMAGE=ghcr.io/google/cadvisor:v0.60.5
 EOF
     # Si se proporciona, el VPS descargara esta release y no necesitara el codigo fuente.
     if [[ -n $requested_app_image ]]; then
@@ -133,6 +165,29 @@ ensure_generated_env REVERB_APP_KEY "$(openssl rand -hex 16)"
 ensure_generated_env REVERB_APP_SECRET "$(openssl rand -hex 32)"
 if ! grep -q '^REVERB_APP_MAX_CONNECTIONS=' .env; then
     printf 'REVERB_APP_MAX_CONNECTIONS=500\n' >> .env
+fi
+if ! grep -q '^PROMETHEUS_DOMAIN=' .env; then
+    existing_app_domain=$(read_env_value APP_DOMAIN)
+    [[ $existing_app_domain =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ && $existing_app_domain == *.* ]] \
+        || fail 'APP_DOMAIN invalido en .env'
+    printf "PROMETHEUS_DOMAIN='metrics.%s'\n" "$existing_app_domain" >> .env
+fi
+if ! grep -q '^PROMETHEUS_USERNAME=' .env; then
+    printf 'PROMETHEUS_USERNAME=grafana\n' >> .env
+fi
+prometheus_domain=$(read_env_value PROMETHEUS_DOMAIN)
+[[ $prometheus_domain =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ && $prometheus_domain == *.* ]] \
+    || fail 'PROMETHEUS_DOMAIN invalido'
+prometheus_username=$(read_env_value PROMETHEUS_USERNAME)
+[[ $prometheus_username =~ ^[a-zA-Z0-9._-]{1,64}$ ]] || fail 'PROMETHEUS_USERNAME invalido'
+prometheus_password_hash=$(read_env_value PROMETHEUS_PASSWORD_HASH)
+if [[ -n $prometheus_password_hash ]]; then
+    [[ $prometheus_password_hash =~ ^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$ ]] \
+        || fail 'PROMETHEUS_PASSWORD_HASH no es un hash bcrypt valido'
+fi
+if [[ -z $prometheus_password_hash && -z $prometheus_plain_password ]]; then
+    [[ -c /dev/tty ]] || fail 'Provisionar PROMETHEUS_PASSWORD_HASH para ejecucion sin terminal'
+    ask_prometheus_password
 fi
 chmod 0600 .env
 # No ejecutar .env como codigo Bash. Compose interpreta su formato.
@@ -165,27 +220,35 @@ bash docker/project-limits.sh "$project_name" "$project_cpus" "$project_memory" 
 # Las referencias mutables solo se resuelven la primera vez o con --refresh-images.
 # El lock contiene exclusivamente imagenes de infraestructura, nunca secretos.
 case "${1:-}" in ''|--refresh-images) ;; *) fail 'Uso: deploy.sh [--refresh-images]';; esac
-if [[ ! -f compose.images.yml || ${1:-} == --refresh-images ]]; then
-    "${base[@]}" pull postgres redis cloudflared
+if [[ ! -f compose.images.yml || ${1:-} == --refresh-images ]] \
+    || ! grep -q '^  prometheus:' compose.images.yml \
+    || ! grep -q '^  cadvisor:' compose.images.yml; then
+    "${base[@]}" pull postgres redis cloudflared prometheus cadvisor
     postgres_image=postgres:18-bookworm
     redis_image=redis:8-bookworm
     cloudflared_image=cloudflare/cloudflared:latest
+    prometheus_image=prom/prometheus:v3.13.3-distroless
+    cadvisor_image=ghcr.io/google/cadvisor:v0.60.5
     infra_settings=$("${base[@]}" config --environment | awk -F= \
-        '$1 == "POSTGRES_IMAGE" || $1 == "REDIS_IMAGE" || $1 == "CLOUDFLARED_IMAGE"')
+        '$1 == "POSTGRES_IMAGE" || $1 == "REDIS_IMAGE" || $1 == "CLOUDFLARED_IMAGE" || $1 == "PROMETHEUS_IMAGE" || $1 == "CADVISOR_IMAGE"')
     while IFS='=' read -r key value; do
         case "$key" in
             POSTGRES_IMAGE) postgres_image=${value:-postgres:18-bookworm} ;;
             REDIS_IMAGE) redis_image=${value:-redis:8-bookworm} ;;
             CLOUDFLARED_IMAGE) cloudflared_image=${value:-cloudflare/cloudflared:latest} ;;
+            PROMETHEUS_IMAGE) prometheus_image=${value:-prom/prometheus:v3.13.3-distroless} ;;
+            CADVISOR_IMAGE) cadvisor_image=${value:-ghcr.io/google/cadvisor:v0.60.5} ;;
         esac
     done <<< "$infra_settings"
     image_lock=$(mktemp compose.images.yml.tmp.XXXXXX)
     printf 'services:\n' > "$image_lock"
-    for service in postgres redis cloudflared; do
+    for service in postgres redis cloudflared prometheus cadvisor; do
         case "$service" in
             postgres) reference=$postgres_image ;;
             redis) reference=$redis_image ;;
             cloudflared) reference=$cloudflared_image ;;
+            prometheus) reference=$prometheus_image ;;
+            cadvisor) reference=$cadvisor_image ;;
         esac
         if ! digest=$(docker image inspect --format '{{index .RepoDigests 0}}' "$reference"); then
             fail "No se pudo inspeccionar la imagen de $service: $reference"
@@ -197,8 +260,8 @@ if [[ ! -f compose.images.yml || ${1:-} == --refresh-images ]]; then
 fi
 dc=("${base[@]}" -f compose.images.yml)
 "${dc[@]}" --profile ops config --quiet
-"${dc[@]}" pull postgres redis cloudflared
-# Web, balanceador, Reverb, release, queue y scheduler reutilizan exactamente la misma imagen.
+"${dc[@]}" pull postgres redis cloudflared prometheus cadvisor
+# Web, gateways, Reverb, release, queue y scheduler reutilizan exactamente la misma imagen.
 if [[ $registry_deploy == true ]]; then
     docker pull "$app_image"
 else
@@ -206,6 +269,28 @@ else
     [[ ${1:-} == --refresh-images ]] && build_args+=(--pull)
     "${dc[@]}" build "${build_args[@]}" app
 fi
+if [[ -n $prometheus_plain_password ]]; then
+    resolved_app_image=${app_image:-laravel-app:local}
+    prometheus_password_hash=$(printf '%s' "$prometheus_plain_password" | docker run --rm -i \
+        --entrypoint php "$resolved_app_image" -r \
+        '$password = stream_get_contents(STDIN); echo password_hash($password, PASSWORD_BCRYPT);')
+    [[ $prometheus_password_hash =~ ^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$ ]] \
+        || fail 'No se pudo generar el hash bcrypt de Prometheus'
+    temporary_env=$(mktemp .env.tmp.XXXXXX)
+    grep -v '^PROMETHEUS_PASSWORD_HASH=' .env > "$temporary_env"
+    printf "PROMETHEUS_PASSWORD_HASH='%s'\n" "$prometheus_password_hash" >> "$temporary_env"
+    chmod 0600 "$temporary_env"
+    mv -- "$temporary_env" .env
+    unset prometheus_plain_password
+fi
+write_prometheus_auth_file "$prometheus_username" "$prometheus_password_hash"
+unset prometheus_password_hash
+prometheus_locked_image=$(awk '/^  prometheus:$/ { getline; sub(/^    image: /, ""); print; exit }' compose.images.yml)
+[[ $prometheus_locked_image == *@sha256:* ]] || fail 'Falta el digest bloqueado de Prometheus'
+docker run --rm --read-only --user 65532:65532 \
+    --cgroup-parent "project-${project_name}.slice" --tmpfs /tmp:rw,noexec,nosuid,size=32m \
+    --volume "$PWD/docker/prometheus:/etc/prometheus:ro" --entrypoint /bin/promtool \
+    "$prometheus_locked_image" check config /etc/prometheus/prometheus.yml
 "${dc[@]}" up -d --wait --wait-timeout 120 postgres redis
 "${dc[@]}" run --rm --no-deps -T release php /app/docker/check-services.php
 
@@ -216,6 +301,8 @@ fi
 "${dc[@]}" up -d --no-deps --wait --wait-timeout 120 reverb
 "${dc[@]}" up -d --no-deps --wait --wait-timeout 120 app
 "${dc[@]}" up -d --no-deps --wait --wait-timeout 120 gateway
+"${dc[@]}" up -d --no-deps --wait --wait-timeout 120 prometheus cadvisor
+"${dc[@]}" up -d --no-deps --wait --wait-timeout 120 metrics-gateway
 "${dc[@]}" up -d --no-deps queue scheduler cloudflared
 
 # Confirmar que cada contenedor en ejecucion pertenece realmente a la slice.
@@ -247,6 +334,8 @@ done
     if ($status !== 200) { fwrite(STDERR, "Health publico devolvio HTTP $status. Revisar ruta del tunel/Access.\n"); exit(1); }
 '
 printf 'Stack operativo. Tiempo total: %s segundos.\n' "$SECONDS"
+printf 'Prometheus: https://%s (usuario: %s).\n' \
+    "$(read_env_value PROMETHEUS_DOMAIN)" "$(read_env_value PROMETHEUS_USERNAME)"
 if ((SECONDS > 120)); then
     printf 'Se ha superado el objetivo de 120 s; revisar tiempos de APT, pulls, migraciones y healthchecks.\n'
 fi

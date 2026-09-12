@@ -52,6 +52,7 @@ RUN mkdir -p storage/app/private storage/app/public storage/framework/views \
     && cp docker-compose.yml deploy.sh /opt/laravel-deploy/ \
     && cp docker/postgres-init.sh docker/redis-start.sh docker/project-limits.sh \
       /opt/laravel-deploy/docker/ \
+    && cp -r docker/prometheus /opt/laravel-deploy/docker/ \
     && chown -R 10001:10001 storage bootstrap/cache \
     && chmod 0755 docker/entrypoint.sh \
     && rm -f bootstrap/cache/config.php bootstrap/cache/routes-*.php bootstrap/cache/events.php

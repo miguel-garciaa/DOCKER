@@ -1,6 +1,7 @@
 {
 	auto_https off
 	admin off
+	metrics
 	servers {
 		timeouts {
 			read_header 10s
@@ -27,6 +28,14 @@ http://:8000 {
 		}
 	}
 	route {
+		@prometheus_metrics {
+			path /internal/metrics
+			remote_ip 172.30.93.2
+		}
+		metrics @prometheus_metrics
+		@blocked_metrics path /internal/metrics
+		respond @blocked_metrics 404
+
 		# cloudflared conserva el alias app:8000 en la red edge.
 		@untrusted not remote_ip 127.0.0.1 ::1 172.30.91.2
 		respond @untrusted 403

@@ -31,6 +31,8 @@
 /.zed
 compose.images.yml
 compose.images.yml.tmp.*
+.prometheus-auth.caddy
+.prometheus-auth.caddy.tmp.*
 frankenphp
 frankenphp-worker.php
 Homestead.json

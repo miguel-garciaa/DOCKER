@@ -149,6 +149,7 @@ services:
         ipv4_address: 172.30.91.3
         aliases: [app]
       web: {ipv4_address: 172.30.92.2}
+      monitoring: {aliases: [gateway-metrics]}
       realtime: {}
     depends_on:
       app: {condition: service_healthy}
@@ -261,12 +262,111 @@ services:
     command: [tunnel, --no-autoupdate, --metrics, 0.0.0.0:2000, run]
     networks:
       edge: {ipv4_address: 172.30.91.2}
+      monitoring: {}
       tunnel_outbound: {}
     depends_on:
       gateway: {condition: service_healthy}
     logging: *logging
 
-# Ningun servicio publica puertos del host. No montar /var/run/docker.sock.
+  metrics-gateway:
+    image: "${APP_IMAGE:-laravel-app:local}"
+    pull_policy: never
+    cgroup_parent: project-${COMPOSE_PROJECT_NAME:-laravel}.slice
+    user: "10001:10001"
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      APP_DOMAIN: ${PROMETHEUS_DOMAIN:?Falta PROMETHEUS_DOMAIN}
+      PROMETHEUS_DOMAIN: ${PROMETHEUS_DOMAIN}
+      HEALTH_URL: http://prometheus:9090/-/healthy
+      HOME: /tmp
+      XDG_CONFIG_HOME: /tmp/config
+      XDG_DATA_HOME: /tmp/data
+    command: [frankenphp, run, --config, /app/docker/MetricsGateway.Caddyfile, --adapter, caddyfile]
+    volumes:
+      - ./.prometheus-auth.caddy:/app/docker/prometheus-auth.caddy:ro
+    tmpfs:
+      - /tmp:uid=10001,gid=10001,mode=1770,size=32m
+    networks:
+      edge:
+        ipv4_address: 172.30.91.4
+        aliases: [metrics]
+      monitoring: {ipv4_address: 172.30.93.4}
+    depends_on:
+      prometheus: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, php, /app/docker/health.php]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    stop_grace_period: 30s
+    logging: *logging
+
+  prometheus:
+    image: ${PROMETHEUS_IMAGE:-prom/prometheus:v3.13.3-distroless}
+    cgroup_parent: project-${COMPOSE_PROJECT_NAME:-laravel}.slice
+    user: "65532:65532"
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-15d}
+      - --storage.tsdb.retention.size=${PROMETHEUS_RETENTION_SIZE:-5GB}
+      - --web.listen-address=0.0.0.0:9090
+      - --web.external-url=https://${PROMETHEUS_DOMAIN:?Falta PROMETHEUS_DOMAIN}
+    volumes:
+      - prometheus_data:/prometheus
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./docker/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    tmpfs:
+      - /tmp:uid=65532,gid=65532,mode=1770,size=32m
+    networks:
+      monitoring: {ipv4_address: 172.30.93.2}
+      web: {ipv4_address: 172.30.92.3}
+    healthcheck:
+      test: [CMD, /bin/promtool, check, healthy]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    stop_grace_period: 30s
+    logging: *logging
+
+  # cAdvisor necesita visibilidad privilegiada de cgroups y del estado Docker.
+  # No publica puertos y todos los montajes del host son de solo lectura.
+  cadvisor:
+    image: ${CADVISOR_IMAGE:-ghcr.io/google/cadvisor:v0.60.5}
+    cgroup_parent: project-${COMPOSE_PROJECT_NAME:-laravel}.slice
+    privileged: true
+    cgroup: host
+    restart: unless-stopped
+    read_only: true
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=15s
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk:/dev/disk:ro
+    tmpfs:
+      - /tmp:mode=1777,size=32m
+    networks: [monitoring]
+    logging: *logging
+
+# Ningun servicio publica puertos del host. cAdvisor es la unica excepcion
+# privilegiada y ve el estado Docker para producir metricas por contenedor.
 networks:
   edge:
     internal: true
@@ -278,6 +378,10 @@ networks:
     internal: true
     ipam:
       config: [{subnet: 172.30.92.0/29}]
+  monitoring:
+    internal: true
+    ipam:
+      config: [{subnet: 172.30.93.0/28}]
   realtime:
     internal: true
   outbound: {}
@@ -287,3 +391,4 @@ volumes:
   postgres_data:
   redis_data:
   uploads:
+  prometheus_data:

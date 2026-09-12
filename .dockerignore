@@ -23,3 +23,5 @@ compose.images.yml
 .deploy.lock
 .env.tmp.*
 compose.images.yml.tmp.*
+.prometheus-auth.caddy
+.prometheus-auth.caddy.tmp.*
