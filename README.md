@@ -116,16 +116,16 @@ No se usa GitHub Actions. Crea un Personal Access Token classic de GitHub con `w
 
 ```bash
 read -r -s -p 'Token GHCR: ' GHCR_TOKEN; echo
-printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u miguel-garciaa --password-stdin
+printf '%s' "$GHCR_TOKEN" | sudo docker login ghcr.io -u miguel-garciaa --password-stdin
 unset GHCR_TOKEN
 
-./publish-image.sh v1.0.0
+DOCKER_SUDO=1 ./publish-image.sh v1.0.0
 ```
 
 Por defecto publica `ghcr.io/miguel-garciaa/docker:v1.0.0` para `linux/amd64`. Para VPS ARM y x86 en la misma release:
 
 ```bash
-PLATFORMS=linux/amd64,linux/arm64 ./publish-image.sh v1.0.0
+DOCKER_SUDO=1 PLATFORMS=linux/amd64,linux/arm64 ./publish-image.sh v1.0.0
 ```
 
 Buildx sube el resultado directamente al registro y adjunta procedencia y SBOM. Usa un tag nuevo por release y, para maxima reproducibilidad, configura `APP_IMAGE` con el digest mostrado por `docker buildx imagetools inspect`. Documentacion oficial: [push con Buildx](https://docs.docker.com/build/exporters/), [builds multiplataforma](https://docs.docker.com/build/building/multi-platform/) y [autenticacion de GHCR](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).

@@ -5,7 +5,12 @@ umask 077
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 [[ $# -le 1 ]] || fail 'Uso: ./publish-image.sh [tag]'
 command -v docker >/dev/null || fail 'Docker no esta instalado'
-docker buildx version >/dev/null 2>&1 || fail 'Docker Buildx no esta disponible'
+case ${DOCKER_SUDO:-0} in
+    0) docker_command=(docker); docker_display=docker ;;
+    1) command -v sudo >/dev/null || fail 'sudo no esta disponible'; docker_command=(sudo docker); docker_display='sudo docker' ;;
+    *) fail 'DOCKER_SUDO admite 0 o 1' ;;
+esac
+"${docker_command[@]}" buildx version >/dev/null 2>&1 || fail 'Docker Buildx no esta disponible'
 
 repository=${IMAGE_REPOSITORY:-ghcr.io/miguel-garciaa/docker}
 tag=${1:-$(git rev-parse --short=12 HEAD)}
@@ -18,11 +23,11 @@ revision=$(git rev-parse HEAD)
 git diff --quiet && git diff --cached --quiet || fail 'Publica solo desde un arbol Git limpio'
 
 reference="${repository}:${tag}"
-if docker buildx imagetools inspect "$reference" >/dev/null 2>&1; then
+if "${docker_command[@]}" buildx imagetools inspect "$reference" >/dev/null 2>&1; then
     fail "La release $reference ya existe; usa un tag nuevo"
 fi
 printf 'Publicando %s para %s\n' "$reference" "$platforms"
-docker buildx build \
+"${docker_command[@]}" buildx build \
     --platform "$platforms" \
     --target app \
     --tag "$reference" \
@@ -35,4 +40,4 @@ docker buildx build \
     .
 
 printf 'Release publicada: %s\n' "$reference"
-printf 'Para ver su digest: docker buildx imagetools inspect %s\n' "$reference"
+printf 'Para ver su digest: %s buildx imagetools inspect %s\n' "$docker_display" "$reference"
