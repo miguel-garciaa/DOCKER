@@ -7,13 +7,13 @@ Visitante --HTTPS--> Cloudflare --tunel cifrado--> cloudflared
                                                      |
                                         HTTP por red Docker privada
                                                      |
-                                          FrankenPHP/Caddy :8000
-                                               /           \
-                                      Laravel Octane    Reverb :8080
-                                         /       \
-                                 PostgreSQL 18  Redis 8
+                                     Caddy gateway :8000
+                                        /       |       \
+                              Laravel app-1  app-2   Reverb :8080
+                                        \       /
+                                  PostgreSQL 18 + Redis 8
 
-queue / scheduler / Reverb: misma imagen, procesos independientes.
+app-1 / app-2 / gateway / queue / scheduler / Reverb reutilizan la misma imagen.
 ```
 
 El repositorio incluye una aplicacion Laravel 13 completa basada en el starter oficial de React: React 19, TypeScript, Inertia 3, Tailwind 4, autenticacion, Octane, Filament 5, Resend y Laravel Reverb para WebSockets. Puede construirse en el VPS o publicarse manualmente como imagen OCI con Buildx. No usa Vercel ni GitHub Actions.
@@ -56,7 +56,7 @@ Un VPS normalmente ya es una VM. Docker se ejecuta dentro: no estas eliminando l
 
 Recomiendo FrankenPHP para este caso por su servidor HTTP integrado y la imagen oficial extensible. RoadRunner tambien es valido, especialmente si ya tienes operaciones y pruebas asentadas sobre el. Cambiar de motor debe comprobar compatibilidad de paquetes y rendimiento; no hay un ganador universal.
 
-Caddy mantiene limites de cuerpo/cabeceras, timeouts, bloqueo de dotfiles y PHP directo, cabeceras basicas, restriccion de host y acceso exclusivo desde cloudflared.
+Caddy mantiene limites de cuerpo/cabeceras, timeouts, bloqueo de dotfiles y PHP directo, cabeceras basicas y restriccion de host. Un gateway Caddy interno recibe exclusivamente desde cloudflared y balancea las replicas Laravel.
 
 **Un contenedor no corrige XSS, IDOR, SQL injection ni fallos de autorizacion.** Comparte kernel con el host y no es una frontera equivalente a otra VM. Aqui no hay puertos publicados, Docker socket, modo privilegiado ni usuarios root en los servicios. `cloudflared` puede llegar a la app, pero no pertenece a la red de PostgreSQL/Redis. La app conserva salida a Internet para Resend y APIs: la separacion de redes no es un firewall de salida completo. El usuario con acceso al daemon Docker tiene privilegios elevados sobre el host.
 
@@ -74,6 +74,7 @@ resources/                       # React, TypeScript y Tailwind
 composer.lock / package-lock.json
 docker/
   Caddyfile                      # HTTP interno, assets y Octane
+  Gateway.Caddyfile             # balanceo app-1/app-2 y entrada a Reverb
   php.ini
   entrypoint.sh                  # web, queue, scheduler y Reverb
   health.php / reverb-health.php / check-services.php
@@ -81,7 +82,7 @@ docker/
   project-limits.sh              # presupuesto CPU/RAM/swap mediante systemd
 ```
 
-`bootstrap/app.php` ya habilita `/up` y confia exclusivamente en la IP fija de `cloudflared` para `X-Forwarded-For` y `X-Forwarded-Proto`. El acceso a `/admin` exige que el email del usuario coincida con `FILAMENT_ADMIN_EMAIL`.
+`bootstrap/app.php` ya habilita `/up` y confia exclusivamente en la IP fija del gateway para `X-Forwarded-For` y `X-Forwarded-Proto`; el gateway solo confia esos datos cuando proceden de cloudflared. El acceso a `/admin` exige que el email del usuario coincida con `FILAMENT_ADMIN_EMAIL`.
 
 Antes de desplegar cambios ejecuta:
 
@@ -139,7 +140,7 @@ Hostname:  app.tudominio.com
 Service:   http://app:8000
 ```
 
-`app` es el nombre DNS del servicio Docker. **No uses `localhost:8000`**, que dentro de `cloudflared` apuntaria al propio conector. El token permite conectar el tunel; no crea por si solo DNS ni su configuracion remota. [Configuracion oficial](https://developers.cloudflare.com/tunnel/setup/).
+`app` es un alias DNS del gateway dentro de la red privada de cloudflared. **No uses `localhost:8000`**, que dentro de `cloudflared` apuntaria al propio conector. La ruta existente no cambia al añadir replicas. El token permite conectar el tunel; no crea por si solo DNS ni su configuracion remota. [Configuracion oficial](https://developers.cloudflare.com/tunnel/setup/).
 
 Activa redireccion a HTTPS en Cloudflare. El tramo publico usa HTTPS y Cloudflare transporta el trafico por el tunel cifrado; el ultimo salto HTTP ocurre en la red Docker de este host. No son necesarias claves TLS en Caddy para este diseño. Evita cachear sesiones, HTML autenticado, `/admin`, `/livewire`, APIs privadas y respuestas con cookies. Conserva CSRF y cookies seguras.
 
@@ -149,9 +150,19 @@ Cada app con datos independientes debe tener su propio tunel. Reutilizar un toke
 
 ### WebSockets con Laravel Reverb
 
-No hace falta crear otra ruta en Cloudflare. El navegador abre `wss://APP_DOMAIN/app/...` por el mismo hostname; Caddy envia solo `/app` al servicio `reverb:8080`. El endpoint interno `/apps`, usado por Laravel para publicar eventos, no se expone directamente. Reverb solo acepta el origen configurado en `APP_DOMAIN`, rechaza eventos enviados directamente por el navegador, tiene healthcheck, un maximo inicial de 500 conexiones y comparte el presupuesto de CPU/RAM/swap del proyecto.
+No hace falta crear otra ruta en Cloudflare. El navegador abre `wss://APP_DOMAIN/app/...` por el mismo hostname; el gateway envia solo `/app` al servicio `reverb:8080` y balancea el resto entre las replicas web. El endpoint interno `/apps`, usado por Laravel para publicar eventos, no se expone directamente. Reverb solo acepta el origen configurado en `APP_DOMAIN`, rechaza eventos enviados directamente por el navegador, tiene healthcheck, un maximo inicial de 500 conexiones y comparte el presupuesto de CPU/RAM/swap del proyecto.
 
 Los cambios de calendario o citas deben entrar por controladores Laravel autenticados y autorizados; despues, los eventos que implementan `ShouldBroadcast` se procesan por el worker de Redis existente. Autoriza cada canal privado en `routes/channels.php`; un usuario nunca debe poder suscribirse al calendario o citas de otra cuenta. En React estan disponibles `useEcho`, `useEchoPublic`, `useEchoPresence` y los demas hooks de `@laravel/echo-react`. Consulta la [documentacion oficial de broadcasting](https://laravel.com/docs/13.x/broadcasting) y [Laravel Reverb](https://laravel.com/docs/13.x/reverb).
+
+### Replicas web, queue y scheduler
+
+`APP_REPLICAS=2` crea `laravel-app-1` y `laravel-app-2`. Caddy consulta Docker DNS, aplica `least_conn` y deja temporalmente fuera una replica que falla. Las conexiones rechazadas antes de enviar la peticion pueden probar la otra replica; una respuesta fallida de un POST no se repite automaticamente para evitar duplicar operaciones. No hace falta afinidad de sesion: ambos procesos usan la misma sesion/cache Redis, la misma base PostgreSQL y el volumen `uploads`. No guardes estado funcional en memoria global de Octane porque esa memoria no se comparte entre replicas.
+
+`queue` ejecuta trabajos asincronos de Redis: correos, broadcasts, importaciones o tareas pesadas. La web puede seguir respondiendo si se detiene, pero esos trabajos quedan pendientes. Laravel puede reintentar un job, por lo que los jobs con efectos externos deben ser idempotentes. `QUEUE_REPLICAS=1` es el valor inicial y puede aumentarse despues si la carga lo exige.
+
+`scheduler` mantiene `php artisan schedule:work` y dispara las tareas definidas en `routes/console.php`. Se conserva **una sola replica** para evitar ejecuciones duplicadas. Si algun dia replicas schedulers entre varios hosts, las tareas sensibles deben usar bloqueos compartidos como `onOneServer` sobre Redis.
+
+Esto da continuidad cuando cae un proceso `app`; no es alta disponibilidad completa. Gateway, Reverb, Redis, PostgreSQL, cloudflared y el propio VPS siguen siendo puntos unicos. Cubrir la perdida del VPS exige al menos otro host, varios conectores del tunel y servicios de datos replicados. Caddy soporta balanceo, reintentos y comprobacion pasiva de fallos; las replicas de Compose se controlan mediante `scale`. Referencias: [reverse_proxy de Caddy](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy) y [scale en Compose](https://docs.docker.com/reference/compose-file/services/#scale).
 
 ## Desplegar
 
@@ -188,9 +199,11 @@ COMPOSE_PROJECT_NAME=laravel
 PROJECT_CPUS=4
 PROJECT_MEMORY=6G
 PROJECT_SWAP=1G
+APP_REPLICAS=2
+QUEUE_REPLICAS=1
 ```
 
-Es un **techo compartido** de 6 GiB de RAM y 1 GiB adicional de swap para app, Reverb, PostgreSQL, Redis, queue, scheduler, cloudflared y migraciones. No reserva RAM ni nucleos fisicos. Cada servicio puede usar CPU disponible, pero todos juntos quedan limitados al tiempo de CPU equivalente a cuatro nucleos. Los limites se aplican a todos los procesos hijos y a la memoria contabilizada por cgroups, incluidos tmpfs y cache de archivos imputada al grupo. El SO, daemon Docker y la construccion BuildKit quedan fuera de este presupuesto.
+Es un **techo compartido** de 6 GiB de RAM y 1 GiB adicional de swap para las dos apps, gateway, Reverb, PostgreSQL, Redis, queue, scheduler, cloudflared y migraciones. No reserva RAM ni nucleos fisicos. Cada servicio puede usar CPU disponible, pero todos juntos quedan limitados al tiempo de CPU equivalente a cuatro nucleos. Los limites se aplican a todos los procesos hijos y a la memoria contabilizada por cgroups, incluidos tmpfs y cache de archivos imputada al grupo. El SO, daemon Docker y la construccion BuildKit quedan fuera de este presupuesto.
 
 `deploy.sh` crea `project-laravel.slice` en systemd con `CPUQuota=400%`, `MemoryMax=6G` y `MemorySwapMax=1G`; todos los servicios utilizan el mismo `cgroup_parent`. Si el host no tiene al menos 1 GiB de swap, crea `/var/lib/laravel-docker/swapfile`, lo activa y lo registra en `/etc/fstab`. Comprueba los valores efectivos del kernel y la pertenencia de los contenedores al grupo. Requiere Docker rootful, driver systemd y cgroups v2; se detiene si no se cumplen. La unidad se conserva tras reiniciar el VPS. Referencias: [cgroup_parent en Compose](https://docs.docker.com/reference/compose-file/services/#cgroup_parent) y [control de recursos de systemd](https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html).
 
@@ -221,7 +234,7 @@ Con la configuracion inicial, `memory.max` debe ser `6442450944`, `memory.swap.m
 
 El primer uso pide dominio y remitente, y solicita `RESEND_KEY`/`TUNNEL_TOKEN` con entrada oculta. Genera `APP_KEY` y passwords aleatorios; los guarda en `.env` con permisos 600 para reinicios y siguientes deploys. Para ejecucion no interactiva, provisiona previamente un `.env` completo mediante tu gestor de secretos. **No borres ni regeneres este archivo en cada despliegue.**
 
-El script instala Docker CE y Compose mediante APT firmado si faltan, construye la app o descarga `APP_IMAGE`, fija las imagenes de infraestructura en `compose.images.yml`, espera PostgreSQL/Redis, valida conexiones de Laravel, detiene workers/Reverb, ejecuta una migracion y recrea Reverb/app/colas/scheduler. Comprueba healthchecks, `/up`, la conexion de cloudflared y `/up` por el dominio publico. El endpoint `/up` debe poder devolver 200 al monitor, sin un challenge o login de Access; si proteges toda la aplicacion, adapta el monitor con autenticacion de servicio.
+El script instala Docker CE y Compose mediante APT firmado si faltan, construye la app o descarga `APP_IMAGE`, fija las imagenes de infraestructura en `compose.images.yml`, espera PostgreSQL/Redis, valida conexiones de Laravel, detiene workers/Reverb, ejecuta una migracion y recrea Reverb, las dos apps, gateway, cola y scheduler. Comprueba healthchecks, `/up`, la conexion de cloudflared y `/up` por el dominio publico. El endpoint `/up` debe poder devolver 200 al monitor, sin un challenge o login de Access; si proteges toda la aplicacion, adapta el monitor con autenticacion de servicio.
 
 `TUNNEL_TOKEN` solo se inyecta en cloudflared. No se imprime ni se pasa por `--token` en la lista de procesos. `.env` y variables Docker son accesibles a root/administradores Docker: no son un vault. La [opcion token-file](https://developers.cloudflare.com/tunnel/reference/run-parameters/) permite evolucionar a un secreto montado cuando dispongas de un gestor.
 
@@ -239,7 +252,7 @@ No cambia las versiones mayores de PostgreSQL/Redis salvo que tu cambies sus ref
 
 Para acercarse a 120 segundos: usa una imagen de VPS con Docker/Compose preinstalados, publica previamente `APP_IMAGE`, prepara el tunel/DNS y mantén breves las migraciones. El primer bootstrap puede durar varios minutos; las actualizaciones que solo descargan capas nuevas suelen ser mucho mas rapidas, pero hay que medirlo en el proveedor.
 
-Compose con una sola replica tiene una breve interrupcion al recrear la app. No promete despliegues sin downtime ni rollback transaccional. Las migraciones deben ser aditivas/compatibles con la version anterior (expandir, migrar datos, retirar despues). No ejecutar `migrate:fresh`. Si una migracion falla, el script se detiene y deja los volumenes intactos. Para volver al codigo anterior, cambia `APP_IMAGE` a una release conocida solo si el esquema sigue siendo compatible; no ejecutes `migrate:rollback` automaticamente.
+Las dos replicas reducen el corte por fallo de un proceso, pero Compose no promete actualizaciones progresivas sin interrupcion ni rollback transaccional. Las migraciones deben ser aditivas/compatibles con la version anterior (expandir, migrar datos, retirar despues). No ejecutar `migrate:fresh`. Si una migracion falla, el script se detiene y deja los volumenes intactos. Para volver al codigo anterior, cambia `APP_IMAGE` a una release conocida solo si el esquema sigue siendo compatible; no ejecutes `migrate:rollback` automaticamente.
 
 ## Persistencia, recursos y operacion
 
@@ -249,7 +262,7 @@ Compose con una sola replica tiene una breve interrupcion al recrear la app. No 
 
 `uploads` persiste `storage/app`; el enlace `public/storage` se construye en la imagen. Los caches de codigo, vistas y estado Octane son privados de cada contenedor para evitar mezclar releases. Archivos temporales de Livewire/Filament en `storage/app` persisten tambien; conserva su limpieza programada. No se garantiza continuidad de una subida HTTP en curso durante un restart.
 
-El presupuesto inicial es **4 CPU, 6 GiB de RAM y 1 GiB de swap compartidos**, con 2 workers web y un queue worker. Es un techo configurable, no una capacidad garantizada de peticiones. PostgreSQL puede necesitar ajustes internos y un job puede exceder el limite PHP de 256 MB. Deja margen para SO, Docker, page cache, tmpfs y forks AOF. Usa disco SSD y monitoriza RAM real, swap, OOM, CPU, espacio e I/O. Redis recomienda revisar [`vm.overcommit_memory` para sus forks](https://redis.io/docs/latest/operate/oss_and_stack/management/admin/); aplica el ajuste en el host conforme a tu politica.
+El presupuesto inicial es **4 CPU, 6 GiB de RAM y 1 GiB de swap compartidos**, con 4 workers web en total (2 por replica) y un queue worker. Es un techo configurable, no una capacidad garantizada de peticiones. PostgreSQL puede necesitar ajustes internos y un job puede exceder el limite PHP de 256 MB. Deja margen para SO, Docker, page cache, tmpfs y forks AOF. Usa disco SSD y monitoriza RAM real, swap, OOM, CPU, espacio e I/O. Si la aplicacion consume demasiada memoria en reposo, baja `OCTANE_WORKERS=1` para tener 2 workers web totales. Redis recomienda revisar [`vm.overcommit_memory` para sus forks](https://redis.io/docs/latest/operate/oss_and_stack/management/admin/); aplica el ajuste en el host conforme a tu politica.
 
 Para operar desde la carpeta del despliegue, abre una sesion administrativa y define:
 
@@ -258,7 +271,7 @@ sudo -i
 cd /opt/miapp
 dc() { docker compose --env-file .env -f docker-compose.yml -f compose.images.yml "$@"; }
 dc ps
-dc logs --tail=100 app reverb queue scheduler cloudflared
+dc logs --tail=100 gateway app reverb queue scheduler cloudflared
 docker stats --no-stream
 dc exec app php artisan make:filament-user
 ```
@@ -306,6 +319,6 @@ dc exec -T postgres sh -c \
 
 Haz tambien backups de uploads y una copia cifrada de secretos/APP_KEY y digests. Programa copia cifrada **fuera del VPS**, retencion y restauraciones de prueba; define RPO/RTO. Para recuperacion a un instante concreto, añade backup fisico/WAL de PostgreSQL con una herramienta dedicada. Esta plantilla no configura un proveedor de backup que no has indicado.
 
-Prueba en un VPS de staging: primer arranque, segundo deploy sobre los mismos volumenes, login/CSRF y URLs HTTPS, IP real y limites de acceso, assets Vite/Filament, canales privados y reconexion WebSocket, upload privado/publico, envio Resend en cola, scheduler, reinicio del host, recuperacion de Redis/PostgreSQL y restauracion de backup. Comprueba que no hay puertos publicados con `docker ps` y el firewall del proveedor. Si la subred 172.30.91.0/29 colisiona con rutas de tu host/VPN, cambiala coherentemente en Compose, Caddy y TrustProxies antes de arrancar.
+Prueba en un VPS de staging: primer arranque, segundo deploy sobre los mismos volumenes, reparto entre replicas, parada manual de `laravel-app-1`, login/CSRF y URLs HTTPS, IP real y limites de acceso, assets Vite/Filament, canales privados y reconexion WebSocket, upload privado/publico, envio Resend en cola, scheduler, reinicio del host, recuperacion de Redis/PostgreSQL y restauracion de backup. Comprueba que no hay puertos publicados con `docker ps` y el firewall del proveedor. Si las subredes 172.30.91.0/29 o 172.30.92.0/29 colisionan con rutas de tu host/VPN, cambialas coherentemente en Compose, ambos Caddyfile y TrustProxies antes de arrancar.
 
 Mide la misma app y datos, PHP/motor/version/workers equivalentes, misma carga y cache caliente/fria: throughput, errores, p50/p95/p99, RSS por proceso, CPU e I/O de BD. Compara primero acceso interno para aislar el origen y despues el dominio Cloudflare. No atribuyas a Docker un cambio causado por pasar de Swoole/RoadRunner a FrankenPHP o por cambiar de hardware.

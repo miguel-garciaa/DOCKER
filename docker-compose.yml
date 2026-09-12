@@ -109,8 +109,9 @@ services:
   app:
     <<: *app
     command: [web]
+    scale: ${APP_REPLICAS:-2}
     networks:
-      edge: {ipv4_address: 172.30.91.3}
+      web: {aliases: [web-backend]}
       data: {}
       outbound: {}
       realtime: {}
@@ -125,14 +126,52 @@ services:
       retries: 6
       start_period: 30s
 
+  gateway:
+    image: "${APP_IMAGE:-laravel-app:local}"
+    pull_policy: never
+    cgroup_parent: project-${COMPOSE_PROJECT_NAME:-laravel}.slice
+    user: "10001:10001"
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN}
+      HOME: /tmp
+      XDG_CONFIG_HOME: /tmp/config
+      XDG_DATA_HOME: /tmp/data
+    command: [frankenphp, run, --config, /app/docker/Gateway.Caddyfile, --adapter, caddyfile]
+    tmpfs:
+      - /tmp:uid=10001,gid=10001,mode=1770,size=32m
+    networks:
+      edge:
+        ipv4_address: 172.30.91.3
+        aliases: [app]
+      web: {ipv4_address: 172.30.92.2}
+      realtime: {}
+    depends_on:
+      app: {condition: service_healthy}
+      reverb: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, php, /app/docker/health.php]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    stop_grace_period: 30s
+    logging: *logging
+
   queue:
     <<: *app
     command: [queue]
+    scale: ${QUEUE_REPLICAS:-1}
     networks: [data, outbound, realtime]
 
   scheduler:
     <<: *app
     command: [scheduler]
+    scale: 1
     networks: [data, outbound, realtime]
 
   reverb:
@@ -224,7 +263,7 @@ services:
       edge: {ipv4_address: 172.30.91.2}
       tunnel_outbound: {}
     depends_on:
-      app: {condition: service_healthy}
+      gateway: {condition: service_healthy}
     logging: *logging
 
 # Ningun servicio publica puertos del host. No montar /var/run/docker.sock.
@@ -235,6 +274,10 @@ networks:
       config: [{subnet: 172.30.91.0/29}]
   data:
     internal: true
+  web:
+    internal: true
+    ipam:
+      config: [{subnet: 172.30.92.0/29}]
   realtime:
     internal: true
   outbound: {}

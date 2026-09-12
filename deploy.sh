@@ -91,6 +91,8 @@ APP_NAME=Laravel
 APP_DOMAIN='$APP_DOMAIN'
 APP_KEY='base64:$(openssl rand -base64 32)'
 OCTANE_WORKERS=2
+APP_REPLICAS=2
+QUEUE_REPLICAS=1
 DB_DATABASE=laravel
 DB_USERNAME=laravel
 DB_PASSWORD='$(openssl rand -hex 32)'
@@ -196,7 +198,7 @@ fi
 dc=("${base[@]}" -f compose.images.yml)
 "${dc[@]}" --profile ops config --quiet
 "${dc[@]}" pull postgres redis cloudflared
-# Web, Reverb, release, queue y scheduler reutilizan exactamente la misma imagen.
+# Web, balanceador, Reverb, release, queue y scheduler reutilizan exactamente la misma imagen.
 if [[ $registry_deploy == true ]]; then
     docker pull "$app_image"
 else
@@ -213,6 +215,7 @@ fi
 "${dc[@]}" run --rm --no-deps -T release
 "${dc[@]}" up -d --no-deps --wait --wait-timeout 120 reverb
 "${dc[@]}" up -d --no-deps --wait --wait-timeout 120 app
+"${dc[@]}" up -d --no-deps --wait --wait-timeout 120 gateway
 "${dc[@]}" up -d --no-deps queue scheduler cloudflared
 
 # Confirmar que cada contenedor en ejecucion pertenece realmente a la slice.
@@ -224,10 +227,10 @@ for container in $("${dc[@]}" ps --quiet); do
         || fail 'El proceso no pertenece al cgroup esperado'
 done
 
-# La imagen cloudflared no contiene shell/curl: consultar /ready desde app.
+# La imagen cloudflared no contiene shell/curl: consultar /ready desde gateway.
 tunnel_ready=false
 for ((attempt=1; attempt<=30; attempt++)); do
-    if "${dc[@]}" exec -T app php -r '
+    if "${dc[@]}" exec -T gateway php -r '
         $c = curl_init("http://cloudflared:2000/ready");
         curl_setopt_array($c, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 2]);
         curl_exec($c);

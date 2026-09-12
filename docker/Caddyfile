@@ -30,8 +30,8 @@ http://:8000 {
         }
     }
     route {
-        # Solo cloudflared y healthchecks locales.
-        @untrusted not remote_ip 127.0.0.1 ::1 172.30.91.2
+        # Solo el balanceador interno y healthchecks locales.
+        @untrusted not remote_ip 127.0.0.1 ::1 172.30.92.2
         respond @untrusted 403
         @wrong_host not host {$APP_DOMAIN}
         respond @wrong_host 421
@@ -40,10 +40,6 @@ http://:8000 {
         # Impide ejecutar PHP subido; el rewrite al worker sucede despues.
         @script path_regexp script (?i)\.(php[0-9]?|phtml|phar)(/|$)
         respond @script 404
-        # Caddy gestiona automaticamente Upgrade/Connection para WebSocket.
-        # /apps permanece interno: Laravel publica directamente a reverb:8080.
-        @reverb path /app /app/*
-        reverse_proxy @reverb reverb:8080
         header {
             -Server
             -X-Powered-By
