@@ -302,6 +302,9 @@ docker run --rm --read-only --user 65532:65532 \
 "${dc[@]}" up -d --no-deps --wait --wait-timeout 120 app
 "${dc[@]}" up -d --no-deps --wait --wait-timeout 120 gateway
 "${dc[@]}" up -d --no-deps --wait --wait-timeout 120 prometheus cadvisor
+# Los archivos de configuracion estan montados desde el host. SIGHUP aplica
+# cambios de scrapes y reglas aunque Compose conserve el contenedor existente.
+"${dc[@]}" kill --signal SIGHUP prometheus
 "${dc[@]}" up -d --no-deps --wait --wait-timeout 120 metrics-gateway
 "${dc[@]}" up -d --no-deps queue scheduler cloudflared
 
