@@ -36,10 +36,6 @@ FROM dependencies AS frontend
 # Wayfinder genera rutas TypeScript ejecutando `php artisan` durante el build,
 # por lo que esta etapa necesita PHP y Node 24 en el mismo entorno.
 COPY --from=node-bin /usr/local/ /usr/local/
-ARG VITE_REVERB_APP_KEY
-ARG VITE_REVERB_HOST
-ARG VITE_REVERB_PORT=443
-ARG VITE_REVERB_SCHEME=https
 # Instala tambien devDependencies: Vite, TypeScript y Tailwind viven normalmente ahi.
 RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
 RUN npm run build
@@ -51,7 +47,11 @@ COPY --from=dependencies /app /app
 COPY --from=frontend /app/public/build /app/public/build
 RUN mkdir -p storage/app/private storage/app/public storage/framework/views \
       storage/framework/sessions storage/framework/cache/data storage/logs bootstrap/cache \
+      /opt/laravel-deploy/docker \
     && ln -sfn /app/storage/app/public /app/public/storage \
+    && cp docker-compose.yml deploy.sh /opt/laravel-deploy/ \
+    && cp docker/postgres-init.sh docker/redis-start.sh docker/project-limits.sh \
+      /opt/laravel-deploy/docker/ \
     && chown -R 10001:10001 storage bootstrap/cache \
     && chmod 0755 docker/entrypoint.sh \
     && rm -f bootstrap/cache/config.php bootstrap/cache/routes-*.php bootstrap/cache/events.php

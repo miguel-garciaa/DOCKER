@@ -15,6 +15,13 @@ return [
 
     'default' => env('REVERB_SERVER', 'reverb'),
 
+    // Datos publicos que Laravel entrega al cliente; nunca incluye el secret.
+    'public' => [
+        'host' => env('REVERB_PUBLIC_HOST', env('APP_DOMAIN', 'localhost')),
+        'port' => (int) env('REVERB_PUBLIC_PORT', 443),
+        'scheme' => env('REVERB_PUBLIC_SCHEME', 'https'),
+    ],
+
     /*
     |--------------------------------------------------------------------------
     | Reverb Servers

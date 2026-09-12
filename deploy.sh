@@ -64,6 +64,12 @@ ask() {
         || fail "Valor vacio o formato no admitido: $name"
     printf -v "$name" '%s' "$value"
 }
+valid_app_image() {
+    [[ $1 =~ ^[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|@sha256:[a-f0-9]{64})$ ]]
+}
+requested_app_image=${APP_IMAGE:-}
+[[ -z $requested_app_image ]] || valid_app_image "$requested_app_image" \
+    || fail 'APP_IMAGE no es una referencia OCI valida; usa registry/ruta:tag o registry/ruta@sha256:digest'
 if [[ ! -f .env ]]; then
     [[ -c /dev/tty ]] || fail 'Provisionar .env con permisos 600 para ejecucion sin terminal'
     ask APP_DOMAIN 'Dominio publico (ejemplo: app.example.com)'
@@ -102,6 +108,10 @@ POSTGRES_IMAGE=postgres:18-bookworm
 REDIS_IMAGE=redis:8-bookworm
 CLOUDFLARED_IMAGE=cloudflare/cloudflared:latest
 EOF
+    # Si se proporciona, el VPS descargara esta release y no necesitara el codigo fuente.
+    if [[ -n $requested_app_image ]]; then
+        printf "APP_IMAGE='%s'\n" "$requested_app_image" >> "$temporary_env"
+    fi
     mv -- "$temporary_env" .env
     unset RESEND_KEY TUNNEL_TOKEN
 fi
@@ -126,6 +136,14 @@ chmod 0600 .env
 # No ejecutar .env como codigo Bash. Compose interpreta su formato.
 base=(docker compose --env-file .env -f docker-compose.yml)
 "${base[@]}" --profile ops config --quiet
+
+# APP_IMAGE es opcional: ausente construye desde el repositorio; presente descarga la release.
+app_image=$("${base[@]}" config --environment | awk -F= '$1 == "APP_IMAGE" { print substr($0, index($0, "=") + 1) }')
+registry_deploy=false
+if [[ -n $app_image ]]; then
+    valid_app_image "$app_image" || fail 'APP_IMAGE no es una referencia OCI valida; usa registry/ruta:tag o registry/ruta@sha256:digest'
+    registry_deploy=true
+fi
 
 # Leer solo parametros no sensibles ya interpretados por Compose, sin source/eval.
 # Los defaults coinciden con x-project-limits para despliegues antiguos.
@@ -178,10 +196,14 @@ fi
 dc=("${base[@]}" -f compose.images.yml)
 "${dc[@]}" --profile ops config --quiet
 "${dc[@]}" pull postgres redis cloudflared
-# Construir una vez: web, Reverb, release, queue y scheduler reutilizan la imagen.
-build_args=()
-[[ ${1:-} == --refresh-images ]] && build_args+=(--pull)
-"${dc[@]}" build "${build_args[@]}" app
+# Web, Reverb, release, queue y scheduler reutilizan exactamente la misma imagen.
+if [[ $registry_deploy == true ]]; then
+    docker pull "$app_image"
+else
+    build_args=()
+    [[ ${1:-} == --refresh-images ]] && build_args+=(--pull)
+    "${dc[@]}" build "${build_args[@]}" app
+fi
 "${dc[@]}" up -d --wait --wait-timeout 120 postgres redis
 "${dc[@]}" run --rm --no-deps -T release php /app/docker/check-services.php
 

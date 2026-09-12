@@ -53,6 +53,10 @@ x-app-environment: &app-environment
   REVERB_SCHEME: http
   REVERB_SERVER_HOST: 0.0.0.0
   REVERB_SERVER_PORT: "8080"
+  # Configuracion publica entregada al navegador en tiempo de ejecucion.
+  REVERB_PUBLIC_HOST: ${APP_DOMAIN}
+  REVERB_PUBLIC_PORT: "443"
+  REVERB_PUBLIC_SCHEME: https
   REVERB_APP_MAX_CONNECTIONS: ${REVERB_APP_MAX_CONNECTIONS:-500}
   REVERB_APP_RATE_LIMITING_ENABLED: "true"
   # Las citas cambian mediante Laravel autenticado; el navegador no puede emitir eventos arbitrarios.
@@ -65,18 +69,12 @@ x-app-environment: &app-environment
   FILAMENT_ADMIN_EMAIL: ${FILAMENT_ADMIN_EMAIL:?Falta FILAMENT_ADMIN_EMAIL}
 
 x-app: &app
-  # Una sola imagen local compartida por web, colas, scheduler y migraciones.
-  image: "${COMPOSE_PROJECT_NAME:-laravel}-app:local"
+  # APP_IMAGE permite descargar una release; el valor local conserva builds desde el codigo.
+  image: "${APP_IMAGE:-laravel-app:local}"
   build:
     context: .
     dockerfile: Dockerfile
     target: app
-    args:
-      # La key es publica; REVERB_APP_SECRET nunca entra en el build.
-      VITE_REVERB_APP_KEY: ${REVERB_APP_KEY:?Falta REVERB_APP_KEY}
-      VITE_REVERB_HOST: ${APP_DOMAIN}
-      VITE_REVERB_PORT: "443"
-      VITE_REVERB_SCHEME: https
   pull_policy: never
   cgroup_parent: project-${COMPOSE_PROJECT_NAME:-laravel}.slice
   user: "10001:10001"

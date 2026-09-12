@@ -64,6 +64,7 @@
             "Composer\\Config::disableProcessTimeout",
             "npm run check",
             "npm run types:check",
+            "npm run build",
             "@test"
         ],
         "types:check": [

@@ -7,11 +7,23 @@ import AuthLayout from '@/layouts/auth-layout';
 import SettingsLayout from '@/layouts/settings/layout';
 import { configureEcho } from '@laravel/echo-react';
 
+const metaContent = (name: string): string =>
+    document.querySelector<HTMLMetaElement>(`meta[name="${name}"]`)?.content ??
+    '';
+
+const reverbPort = Number(metaContent('reverb-port')) || 443;
+
 configureEcho({
     broadcaster: 'reverb',
+    key: metaContent('reverb-app-key'),
+    wsHost: metaContent('reverb-host'),
+    wsPort: reverbPort,
+    wssPort: reverbPort,
+    forceTLS: metaContent('reverb-scheme') === 'https',
+    enabledTransports: ['ws', 'wss'],
 });
 
-const appName = import.meta.env.VITE_APP_NAME || 'Laravel';
+const appName = metaContent('app-name') || 'Laravel';
 
 void createInertiaApp({
     title: (title) => (title ? `${title} - ${appName}` : appName),

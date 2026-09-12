@@ -16,7 +16,7 @@ Visitante --HTTPS--> Cloudflare --tunel cifrado--> cloudflared
 queue / scheduler / Reverb: misma imagen, procesos independientes.
 ```
 
-El repositorio incluye una aplicacion Laravel 13 completa basada en el starter oficial de React: React 19, TypeScript, Inertia 3, Tailwind 4, autenticacion, Octane, Filament 5, Resend y Laravel Reverb para WebSockets. Tambien contiene el build de produccion y los servicios Docker. No usa Vercel, GitHub Actions ni un registry para desplegar.
+El repositorio incluye una aplicacion Laravel 13 completa basada en el starter oficial de React: React 19, TypeScript, Inertia 3, Tailwind 4, autenticacion, Octane, Filament 5, Resend y Laravel Reverb para WebSockets. Puede construirse en el VPS o publicarse manualmente como imagen OCI con Buildx. No usa Vercel ni GitHub Actions.
 
 ## Sistema base y frontend
 
@@ -66,6 +66,7 @@ Caddy mantiene limites de cuerpo/cabeceras, timeouts, bloqueo de dotfiles y PHP 
 Dockerfile                       # PHP, Composer y Vite en etapas separadas
 docker-compose.yml               # todos los servicios del proyecto
 deploy.sh                        # bootstrap y despliegue
+publish-image.sh                 # publicacion manual mediante Buildx
 .env.example                     # referencia; deploy genera .env
 .dockerignore / .gitignore / .gitattributes
 app/ bootstrap/ config/ routes/  # aplicacion Laravel 13
@@ -90,9 +91,12 @@ composer ci:check
 
 Este comando ejecuta tests, Pint, PHPStan, comprobaciones TypeScript, formato y el build frontend configurados en el proyecto.
 
-## Construccion local
+## Imagen de aplicacion
 
-`deploy.sh` construye en el VPS una unica imagen local llamada `laravel-app:local`. Los servicios web, Reverb, migraciones, colas y scheduler reutilizan exactamente esa imagen; Node, npm, Composer y las dependencias de compilacion no quedan en la etapa final.
+Los servicios web, Reverb, migraciones, colas y scheduler reutilizan exactamente una imagen de aplicacion. Node, npm, Composer y las dependencias de compilacion no quedan en la etapa final. Hay dos modos:
+
+- Sin `APP_IMAGE`, `deploy.sh` construye `laravel-app:local` desde el repositorio.
+- Con `APP_IMAGE`, descarga la release del registro y no necesita el codigo Laravel en el VPS.
 
 Para construir sin desplegar:
 
@@ -100,9 +104,31 @@ Para construir sin desplegar:
 docker compose --env-file .env build app
 ```
 
-El build utiliza locks, `composer install --no-dev`, Node 24, `npm ci`, assets compilados y cache de descargas. No se hace `config:cache` con secretos durante la construccion: se ejecuta al arrancar cada proceso con su entorno real. El codigo permanece de solo lectura y no se monta el repositorio del host sobre `/app`.
+El build utiliza locks, `composer install --no-dev`, Node 24, `npm ci`, assets compilados y cache de descargas. No se hace `config:cache` con secretos durante la construccion: se ejecuta al arrancar cada proceso con su entorno real. El dominio y la clave publica de Reverb tambien se entregan en tiempo de ejecucion, por lo que una misma imagen sirve para varios dominios. El codigo permanece de solo lectura y no se monta el repositorio del host sobre `/app`.
 
-Para reconstrucciones reproducibles tambien fija `PHP_IMAGE`, `COMPOSER_IMAGE` y `NODE_IMAGE` mediante `--build-arg NOMBRE=imagen@sha256:...`. Programa actualizaciones probadas de esas referencias. Las etiquetas por defecto facilitan el primer build, pero por si solas no son inmutables. No pases secretos como `ARG` ni como `VITE_*`.
+Para reconstrucciones reproducibles tambien fija `PHP_IMAGE`, `COMPOSER_IMAGE` y `NODE_IMAGE` mediante `--build-arg NOMBRE=imagen@sha256:...`. Programa actualizaciones probadas de esas referencias. Las etiquetas por defecto facilitan el primer build, pero por si solas no son inmutables. No pases secretos como `ARG`.
+
+### Publicar manualmente con Buildx
+
+Una imagen no puede contener y administrar PostgreSQL, Redis y cloudflared como si fueran un unico contenedor. La imagen publicada contiene Laravel, FrankenPHP, Reverb, el frontend compilado y un paquete minimo de despliegue. Compose sigue creando procesos y volumenes separados, que es lo que permite actualizar, reiniciar y respaldar cada componente correctamente.
+
+No se usa GitHub Actions. Crea un Personal Access Token classic de GitHub con `write:packages`, inicia sesion sin escribir el token en el historial y publica una etiqueta inmutable:
+
+```bash
+read -r -s -p 'Token GHCR: ' GHCR_TOKEN; echo
+printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u miguel-garciaa --password-stdin
+unset GHCR_TOKEN
+
+./publish-image.sh v1.0.0
+```
+
+Por defecto publica `ghcr.io/miguel-garciaa/docker:v1.0.0` para `linux/amd64`. Para VPS ARM y x86 en la misma release:
+
+```bash
+PLATFORMS=linux/amd64,linux/arm64 ./publish-image.sh v1.0.0
+```
+
+Buildx sube el resultado directamente al registro y adjunta procedencia y SBOM. Usa un tag nuevo por release y, para maxima reproducibilidad, configura `APP_IMAGE` con el digest mostrado por `docker buildx imagetools inspect`. Documentacion oficial: [push con Buildx](https://docs.docker.com/build/exporters/), [builds multiplataforma](https://docs.docker.com/build/building/multi-platform/) y [autenticacion de GHCR](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
 
 ## Preparar Cloudflare: una vez por aplicacion/VPS
 
@@ -127,13 +153,31 @@ No hace falta crear otra ruta en Cloudflare. El navegador abre `wss://APP_DOMAIN
 
 Los cambios de calendario o citas deben entrar por controladores Laravel autenticados y autorizados; despues, los eventos que implementan `ShouldBroadcast` se procesan por el worker de Redis existente. Autoriza cada canal privado en `routes/channels.php`; un usuario nunca debe poder suscribirse al calendario o citas de otra cuenta. En React estan disponibles `useEcho`, `useEchoPublic`, `useEchoPresence` y los demas hooks de `@laravel/echo-react`. Consulta la [documentacion oficial de broadcasting](https://laravel.com/docs/13.x/broadcasting) y [Laravel Reverb](https://laravel.com/docs/13.x/reverb).
 
-## Desplegar: un comando
+## Desplegar
 
-En un VPS Ubuntu 26.04 LTS nuevo (tambien admite 24.04), clona este repositorio completo, entra en su directorio y ejecuta:
+Desde un clon del repositorio, en Ubuntu 26.04 LTS o 24.04:
 
 ```bash
 sudo bash ./deploy.sh
 ```
+
+Para desplegar la imagen sin clonar Laravel, primero instala Docker, descarga la release y extrae unicamente los cinco archivos pequenos incluidos en `/opt/laravel-deploy`:
+
+```bash
+APP_IMAGE='ghcr.io/miguel-garciaa/docker:v1.0.0'
+sudo docker pull "$APP_IMAGE"
+container=$(sudo docker create "$APP_IMAGE")
+mkdir -p "$HOME/miapp"
+sudo docker cp "$container:/opt/laravel-deploy/." "$HOME/miapp/"
+sudo docker rm "$container"
+sudo chown -R "$USER:$USER" "$HOME/miapp"
+cd "$HOME/miapp"
+sudo env APP_IMAGE="$APP_IMAGE" bash ./deploy.sh
+```
+
+Si el paquete GHCR es privado, ejecuta antes `sudo docker login ghcr.io` con un token classic limitado a `read:packages`. Si lo haces publico, los VPS pueden descargarlo sin credenciales. `deploy.sh` guarda `APP_IMAGE`, el dominio y los secretos en `.env`, descarga la release en cada despliegue y omite completamente el build. En actualizaciones posteriores cambia `APP_IMAGE` en `.env` y ejecuta otra vez `sudo bash ./deploy.sh`.
+
+Tras el primer `deploy.sh` puedes usar `docker compose up -d`; el script sigue siendo necesario inicialmente y cuando cambies el presupuesto porque `docker compose up` por si solo no crea el limite agregado de systemd.
 
 ### Limite conjunto de RAM y CPU por proyecto
 
@@ -177,7 +221,7 @@ Con la configuracion inicial, `memory.max` debe ser `6442450944`, `memory.swap.m
 
 El primer uso pide dominio y remitente, y solicita `RESEND_KEY`/`TUNNEL_TOKEN` con entrada oculta. Genera `APP_KEY` y passwords aleatorios; los guarda en `.env` con permisos 600 para reinicios y siguientes deploys. Para ejecucion no interactiva, provisiona previamente un `.env` completo mediante tu gestor de secretos. **No borres ni regeneres este archivo en cada despliegue.**
 
-El script instala Docker CE y Compose mediante APT firmado si faltan, descarga imagenes, fija las de infraestructura en `compose.images.yml`, espera PostgreSQL/Redis, valida conexiones de Laravel, detiene workers/Reverb, ejecuta una migracion y recrea Reverb/app/colas/scheduler. Comprueba healthchecks, `/up`, la conexion de cloudflared y `/up` por el dominio publico. El endpoint `/up` debe poder devolver 200 al monitor, sin un challenge o login de Access; si proteges toda la aplicacion, adapta el monitor con autenticacion de servicio.
+El script instala Docker CE y Compose mediante APT firmado si faltan, construye la app o descarga `APP_IMAGE`, fija las imagenes de infraestructura en `compose.images.yml`, espera PostgreSQL/Redis, valida conexiones de Laravel, detiene workers/Reverb, ejecuta una migracion y recrea Reverb/app/colas/scheduler. Comprueba healthchecks, `/up`, la conexion de cloudflared y `/up` por el dominio publico. El endpoint `/up` debe poder devolver 200 al monitor, sin un challenge o login de Access; si proteges toda la aplicacion, adapta el monitor con autenticacion de servicio.
 
 `TUNNEL_TOKEN` solo se inyecta en cloudflared. No se imprime ni se pasa por `--token` en la lista de procesos. `.env` y variables Docker son accesibles a root/administradores Docker: no son un vault. La [opcion token-file](https://developers.cloudflare.com/tunnel/reference/run-parameters/) permite evolucionar a un secreto montado cuando dispongas de un gestor.
 
@@ -187,15 +231,15 @@ En otros VPS, copia tambien `compose.images.yml` para mantener **los mismos dige
 sudo bash ./deploy.sh --refresh-images
 ```
 
-No cambia las versiones mayores de PostgreSQL/Redis salvo que tu cambies sus referencias. Prueba las nuevas imagenes antes de refrescar en produccion. `--refresh-images` tambien actualiza las imagenes base usadas al reconstruir la aplicacion.
+No cambia las versiones mayores de PostgreSQL/Redis salvo que tu cambies sus referencias. Prueba las nuevas imagenes antes de refrescar en produccion. En modo de build local, `--refresh-images` tambien actualiza las imagenes base de la aplicacion; en modo `APP_IMAGE`, la release ya esta construida y se descarga directamente.
 
 ### El objetivo de 120 segundos
 
 **Es un objetivo medible, no una garantia desde un VPS vacio.** APT, locks de cloud-init, ancho de banda, descompresion de capas, inicializacion de BD, migraciones y propagacion de DNS pueden superarlo. El script mide el tiempo real y lo informa; no impone un timeout global que corte una migracion.
 
-Para acercarse a 120 segundos: usa una imagen de VPS con Docker/Compose preinstalados, conserva la cache de BuildKit, prepara el tunel/DNS y mantén breves las migraciones. El primer bootstrap y la primera compilacion pueden durar varios minutos; las actualizaciones con capas en cache pueden encajar en 120 segundos, pero hay que medirlo en el proveedor.
+Para acercarse a 120 segundos: usa una imagen de VPS con Docker/Compose preinstalados, publica previamente `APP_IMAGE`, prepara el tunel/DNS y mantén breves las migraciones. El primer bootstrap puede durar varios minutos; las actualizaciones que solo descargan capas nuevas suelen ser mucho mas rapidas, pero hay que medirlo en el proveedor.
 
-Compose con una sola replica tiene una breve interrupcion al recrear la app. No promete despliegues sin downtime ni rollback transaccional. Las migraciones deben ser aditivas/compatibles con la version anterior (expandir, migrar datos, retirar despues). No ejecutar `migrate:fresh`. Si una migracion falla, el script se detiene y deja los volumenes intactos. Para volver al codigo anterior, restaura un commit conocido, reconstruye y despliega solo si el esquema sigue siendo compatible; no ejecutes `migrate:rollback` automaticamente.
+Compose con una sola replica tiene una breve interrupcion al recrear la app. No promete despliegues sin downtime ni rollback transaccional. Las migraciones deben ser aditivas/compatibles con la version anterior (expandir, migrar datos, retirar despues). No ejecutar `migrate:fresh`. Si una migracion falla, el script se detiene y deja los volumenes intactos. Para volver al codigo anterior, cambia `APP_IMAGE` a una release conocida solo si el esquema sigue siendo compatible; no ejecutes `migrate:rollback` automaticamente.
 
 ## Persistencia, recursos y operacion
 

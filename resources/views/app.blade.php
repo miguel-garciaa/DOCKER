@@ -3,6 +3,12 @@
     <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="csrf-token" content="{{ csrf_token() }}">
+        <meta name="app-name" content="{{ config('app.name', 'Laravel') }}">
+        <meta name="reverb-app-key" content="{{ config('broadcasting.connections.reverb.key') }}">
+        <meta name="reverb-host" content="{{ config('reverb.public.host') }}">
+        <meta name="reverb-port" content="{{ config('reverb.public.port') }}">
+        <meta name="reverb-scheme" content="{{ config('reverb.public.scheme') }}">
 
         {{-- Inline script to detect system dark mode preference and apply it immediately --}}
         <script>
