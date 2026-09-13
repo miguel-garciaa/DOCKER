@@ -35,28 +35,10 @@ if [[ $print_only == true ]]; then printf '%s\n' "$unit"; exit 0; fi
 [[ $(docker info --format '{{.CgroupDriver}} {{.CgroupVersion}}') == 'systemd 2' ]] \
     || fail 'Se requiere Docker con driver systemd y cgroups v2; no se modifica el daemon automaticamente'
 
-# MemorySwapMax limita el cgroup, pero necesita swap real en el host.
-if ((swap_bytes > 0)); then
-    swap_dir=/var/lib/laravel-docker
-    swap_file=$swap_dir/swapfile
-    host_swap_bytes=$(awk '/^SwapTotal:/ { printf "%.0f", $2 * 1024 }' /proc/meminfo)
-    if ((host_swap_bytes < swap_bytes)); then
-        install -d -m 0700 "$swap_dir"
-        if swapon --show=NAME --noheadings 2>/dev/null | grep -Fxq "$swap_file"; then
-            fail "El swap activo de $swap_file es menor que $swap; redimensionalo manualmente"
-        fi
-        rm -f -- "$swap_file"
-        if ! fallocate -l "$swap" "$swap_file"; then
-            dd if=/dev/zero of="$swap_file" bs=1M count=$((swap_bytes / 1048576)) status=none
-        fi
-        chmod 0600 "$swap_file"
-        mkswap "$swap_file" >/dev/null
-        swapon "$swap_file" || fail 'El proveedor o filesystem no permite activar swap'
-    fi
-    if swapon --show=NAME --noheadings 2>/dev/null | grep -Fxq "$swap_file"; then
-        grep -Fqx "$swap_file none swap sw 0 0" /etc/fstab \
-            || printf '%s none swap sw 0 0\n' "$swap_file" >> /etc/fstab
-    fi
+# El limite no reserva ni crea swap fisica; provisionarla en el host si se necesita.
+host_swap_bytes=$(awk '/^SwapTotal:/ { printf "%.0f", $2 * 1024 }' /proc/meminfo)
+if ((swap_bytes > host_swap_bytes)); then
+    fail 'PROJECT_SWAP supera la swap existente. Provisionarla en el host o usar PROJECT_SWAP=0'
 fi
 unit_path="/etc/systemd/system/$slice"
 if [[ -e $unit_path ]]; then

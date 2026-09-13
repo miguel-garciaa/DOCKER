@@ -20,7 +20,9 @@ revision=$(git rev-parse HEAD)
 [[ $repository =~ ^[a-z0-9][a-z0-9._/-]*$ ]] || fail 'IMAGE_REPOSITORY invalido o con mayusculas'
 [[ $tag =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || fail 'Tag OCI invalido'
 [[ $platforms =~ ^linux/(amd64|arm64)(,linux/(amd64|arm64))?$ ]] || fail 'PLATFORMS admite linux/amd64, linux/arm64 o ambos'
-git diff --quiet && git diff --cached --quiet || fail 'Publica solo desde un arbol Git limpio'
+if ! git diff --quiet || ! git diff --cached --quiet || [[ -n $(git ls-files --others --exclude-standard) ]]; then
+    fail 'Publica solo desde un arbol Git limpio'
+fi
 
 reference="${repository}:${tag}"
 if "${docker_command[@]}" buildx imagetools inspect "$reference" >/dev/null 2>&1; then
@@ -29,7 +31,7 @@ fi
 printf 'Publicando %s para %s\n' "$reference" "$platforms"
 "${docker_command[@]}" buildx build \
     --platform "$platforms" \
-    --target app \
+    --target runtime \
     --tag "$reference" \
     --label "org.opencontainers.image.source=https://github.com/miguel-garciaa/DOCKER" \
     --label "org.opencontainers.image.revision=$revision" \

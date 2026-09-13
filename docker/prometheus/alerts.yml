@@ -19,7 +19,7 @@ groups:
           description: "Revisa memoria, swap y logs del servicio {{ $labels.container_label_com_docker_compose_service }}."
 
       - alert: LaravelReplicaCapacityLow
-        expr: count(up{job="caddy-app"} == 1) < 2
+        expr: (sum(up{job=~"app-1|app-2"}) or vector(0)) < 2
         for: 2m
         labels:
           severity: critical
@@ -34,3 +34,35 @@ groups:
         annotations:
           summary: "Prometheus no puede evaluar alguna regla"
           description: "Comprueba las reglas y los logs de Prometheus."
+
+      - alert: HostDiskAlmostFull
+        expr: node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"} / node_filesystem_size_bytes < 0.15
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Menos del 15% de espacio libre en {{ $labels.mountpoint }}"
+
+      - alert: CloudflareTunnelDisconnected
+        expr: cloudflared_tunnel_ha_connections == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "El conector ha perdido todas las conexiones con Cloudflare"
+
+      - alert: BackupOverdue
+        expr: time() - laravel_backup_last_success_timestamp_seconds > 90000 or absent(laravel_backup_last_success_timestamp_seconds)
+        for: 1h
+        labels:
+          severity: critical
+        annotations:
+          summary: "Backup diario ausente o demasiado antiguo"
+
+      - alert: BackupVerificationOverdue
+        expr: time() - laravel_backup_check_last_success_timestamp_seconds > 691200 or absent(laravel_backup_check_last_success_timestamp_seconds)
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Falta una verificacion reciente del repositorio Restic"

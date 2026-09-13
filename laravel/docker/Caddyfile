@@ -1,0 +1,69 @@
+{
+	auto_https off
+	admin 127.0.0.1:2019
+	metrics
+	servers {
+		timeouts {
+			read_header 10s
+			read_body 30s
+			write 60s
+			idle 120s
+		}
+		max_header_size 32KB
+	}
+	frankenphp {
+		worker {
+			file /app/public/frankenphp-worker.php
+			{$CADDY_SERVER_WORKER_DIRECTIVE}
+		}
+	}
+}
+
+http://:8000 {
+	# No guardar cookies, cabeceras ni query strings en los logs de acceso.
+	log {
+		format filter {
+			wrap json
+			fields {
+				request>headers delete
+				request>uri delete
+				resp_headers delete
+			}
+		}
+	}
+	route {
+		@prometheus_metrics path /internal/metrics
+		metrics @prometheus_metrics
+		@blocked_metrics path /internal/metrics
+		respond @blocked_metrics 404
+
+		@wrong_host not host {$APP_DOMAIN}
+		respond @wrong_host 421
+		@hidden path_regexp hidden (^|/)\.
+		respond @hidden 404
+		# Impide ejecutar PHP subido; el rewrite al worker sucede despues.
+		@script path_regexp script (?i)\.(php[0-9]?|phtml|phar)(/|$)
+		respond @script 404
+		header {
+			-Server
+			-X-Powered-By
+			X-Content-Type-Options nosniff
+			X-Frame-Options DENY
+			Referrer-Policy strict-origin-when-cross-origin
+			Strict-Transport-Security "max-age=31536000"
+			Content-Security-Policy "base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; upgrade-insecure-requests"
+			Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+			X-Permitted-Cross-Domain-Policies none
+		}
+		request_body {
+			max_size 24MB
+		}
+		root * /app/public
+		encode zstd gzip
+		php_server {
+			index frankenphp-worker.php
+			try_files {path} frankenphp-worker.php
+			resolve_root_symlink
+		}
+	}
+}
