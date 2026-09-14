@@ -11,24 +11,34 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-echo "[1/7] Actualizando Ubuntu"
+echo "[1/7] Comprobando .env"
+if [[ ! -f .env ]]; then
+    echo "Falta el archivo .env."
+    echo "Créalo primero con: cp .env.example .env"
+    echo "Después edítalo con: nano .env"
+    exit 1
+fi
+chmod 600 .env
+
+echo "[2/7] Actualizando Ubuntu"
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 apt update
 apt upgrade -y
 
-echo "[2/7] Instalando paquetes básicos y servicios"
+echo "[3/7] Instalando paquetes básicos y servicios"
 apt install -y \
     htop nano git curl wget unzip zip jq rsync tree tmux lsof \
     ca-certificates gnupg openssl bash-completion \
     iproute2 iputils-ping dnsutils net-tools \
     openssh-server ufw fail2ban unattended-upgrades \
     apparmor apparmor-utils chrony python3-systemd \
-    docker.io docker-compose-v2 apache2-utils age
+    docker.io docker-compose-v2 docker-buildx apache2-utils age
 
 systemctl enable --now docker chrony apparmor
+docker compose --env-file .env config --quiet
 
-echo "[3/7] Preparando el usuario $SSH_USER"
+echo "[4/7] Preparando el usuario $SSH_USER"
 if ! id "$SSH_USER" >/dev/null 2>&1; then
     adduser --gecos "" "$SSH_USER"
 fi
@@ -41,7 +51,7 @@ if [[ $(passwd -S "$SSH_USER" | awk '{print $2}') != P ]]; then
     passwd "$SSH_USER"
 fi
 
-echo "[4/7] Configurando SSH en el puerto $SSH_PORT"
+echo "[5/7] Configurando SSH en el puerto $SSH_PORT"
 install -d -m 700 /var/backups/laravel-host
 
 if [[ ! -f /var/backups/laravel-host/sshd_config.original ]]; then
@@ -90,7 +100,7 @@ grep -qx "permitrootlogin no" <<< "$SSHD_EFFECTIVE"
 grep -qx "passwordauthentication yes" <<< "$SSHD_EFFECTIVE"
 grep -qx "allowusers $SSH_USER" <<< "$SSHD_EFFECTIVE"
 
-echo "[5/7] Configurando UFW y Fail2ban"
+echo "[6/7] Configurando UFW y Fail2ban"
 ufw default deny incoming
 ufw default allow outgoing
 ufw allow "$SSH_PORT/tcp" comment SSH
@@ -163,17 +173,6 @@ EOF
 cat > /etc/apt/apt.conf.d/52laravel-unattended-upgrades <<'EOF'
 Unattended-Upgrade::Automatic-Reboot "false";
 EOF
-
-echo "[6/7] Comprobando .env"
-if [[ ! -f .env ]]; then
-    cp .env.example .env
-    chmod 600 .env
-    echo "Se ha creado .env. Edítalo con: nano .env"
-    echo "Después ejecuta otra vez: sudo ./deploy.sh"
-    exit 1
-fi
-
-chmod 600 .env
 
 echo "[7/7] Desplegando los contenedores"
 docker compose --env-file .env up -d --build --wait --remove-orphans

@@ -16,7 +16,8 @@ RUN composer install --no-dev --prefer-dist --no-interaction --no-progress --no-
     && npm ci --no-audit --no-fund
 
 COPY laravel/ ./
-RUN mkdir -p storage/framework/views storage/framework/sessions \
+RUN rm -f bootstrap/cache/*.php \
+    && mkdir -p storage/framework/views storage/framework/sessions \
         storage/framework/cache/data storage/logs storage/app/private \
         storage/app/public bootstrap/cache \
     && composer dump-autoload --no-dev --optimize --no-interaction \

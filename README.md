@@ -18,8 +18,13 @@ Primera ejecución:
 
 ```bash
 cd ~/DOCKER
+cp .env.example .env
+nano .env
 sudo ./deploy.sh
 ```
+
+El archivo `.env` debe estar completo antes de ejecutar el script. El
+despliegue no crea ni modifica sus variables.
 
 El acceso SSH queda configurado para el usuario `miguel`, usando su contraseña
 normal y el puerto 4040. El acceso de root queda deshabilitado. Mantén abierta
@@ -41,13 +46,6 @@ Para retirar un bloqueo accidental de tu IP:
 
 ```bash
 sudo fail2ban-client set sshd unbanip TU_IP
-```
-
-Si no existe `.env`, el script lo crea desde `.env.example` y termina para que
-puedas editarlo:
-
-```bash
-nano .env
 ```
 
 Completa todas las variables obligatorias de `.env` antes de desplegar.

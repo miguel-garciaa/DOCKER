@@ -1,0 +1,14 @@
+.git
+.env
+
+laravel/.env
+laravel/.phpunit.result.cache
+laravel/vendor
+laravel/node_modules
+laravel/tests
+laravel/bootstrap/cache/*.php
+laravel/storage/app/*
+laravel/storage/framework/*
+laravel/storage/logs/*
+laravel/public/build
+laravel/public/frankenphp-worker.php
