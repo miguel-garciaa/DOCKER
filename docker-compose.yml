@@ -56,6 +56,7 @@ services:
       - /bin/sh
       - -c
       - |
+        envsubst '$$APP_DOMAIN $$METRICS_DOMAIN' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf
         printf '%s:%s\n' "$$METRICS_USERNAME" "$$METRICS_PASSWORD_HASH" > /tmp/.htpasswd
         exec nginx -g 'daemon off;'
     volumes:
