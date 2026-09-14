@@ -1,0 +1,15 @@
+{
+    "name": "shiki-php",
+    "license": "MIT",
+    "author": "Spatie",
+    "main": "index.js",
+    "scripts": {
+        "build": "rollup -c"
+    },
+    "dependencies": {
+        "shiki": "^4.0.2"
+    },
+    "engines": {
+        "node": ">=20"
+    }
+}

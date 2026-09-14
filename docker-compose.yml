@@ -1,39 +1,70 @@
 name: ${COMPOSE_PROJECT_NAME:-laravel}
 
+x-logging: &logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-service: &service
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  logging: *logging
+
+x-laravel: &laravel
+  <<: *service
+  image: ${APP_IMAGE:-laravel-app:local}
+  pull_policy: never
+  user: www-data
+  init: true
+  pids_limit: 256
+  env_file: ./docker/app.env
+  volumes:
+    - uploads:/app/storage/app
+  tmpfs:
+    - /tmp:uid=33,gid=33,mode=1770,size=128m
+    - /app/bootstrap/cache:uid=33,gid=33,mode=0770,size=64m
+    - /app/storage/framework:uid=33,gid=33,mode=0770,size=128m
+    - /app/storage/logs:uid=33,gid=33,mode=0770,size=16m
+  networks: [application, data]
+  depends_on:
+    postgres: {condition: service_healthy}
+    redis: {condition: service_healthy}
+  stop_grace_period: 75s
+
+x-app-health: &app-health
+  test: [CMD, php, /app/docker/health.php]
+  interval: 10s
+  timeout: 5s
+  retries: 6
+  start_period: 30s
+
 services:
-  caddy:
-    image: ${COMPOSE_PROJECT_NAME:-laravel}-caddy:local
-    build:
-      context: .
-      # Quitar la file capability evita EPERM con cap_drop: ALL.
-      dockerfile_inline: |
-        FROM caddy:2.11.2-alpine
-        RUN setcap -r /usr/bin/caddy
-    pull_policy: never
-    cgroup_parent: project-${COMPOSE_PROJECT_NAME:-laravel}.slice
-    restart: unless-stopped
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    logging:
-      driver: local
-      options: {max-size: "10m", max-file: "3"}
-    user: "1000:1000"
+  nginx:
+    <<: *service
+    image: nginx:1.31.5-alpine
+    user: "101:101"
     pids_limit: 128
     environment:
       APP_DOMAIN: ${APP_DOMAIN:?Falta APP_DOMAIN}
       METRICS_DOMAIN: ${METRICS_DOMAIN:?Falta METRICS_DOMAIN}
       METRICS_USERNAME: ${METRICS_USERNAME:-grafana}
-      METRICS_PASSWORD_HASH: ${METRICS_PASSWORD_HASH:?Falta hash bcrypt}
-      BLOCKED_IPS: ${BLOCKED_IPS:-0.0.0.0/32}
-      XDG_CONFIG_HOME: /tmp/config
-      XDG_DATA_HOME: /tmp/data
-    entrypoint: [/bin/sh, /etc/caddy/start.sh]
+      METRICS_PASSWORD_HASH: ${METRICS_PASSWORD_HASH:?Falta METRICS_PASSWORD_HASH}
+    command:
+      - /bin/sh
+      - -c
+      - |
+        printf '%s:%s\n' "$$METRICS_USERNAME" "$$METRICS_PASSWORD_HASH" > /tmp/.htpasswd
+        exec nginx -g 'daemon off;'
     volumes:
-      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./docker/caddy-start.sh:/etc/caddy/start.sh:ro
+      - ./docker/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
     tmpfs:
-      - /tmp:uid=1000,gid=1000,mode=1770,size=32m
+      - /etc/nginx/conf.d:uid=101,gid=101,mode=0755,size=4m
+      - /var/cache/nginx:uid=101,gid=101,mode=0755,size=32m
+      - /var/run:uid=101,gid=101,mode=0755,size=4m
+      - /tmp:uid=101,gid=101,mode=0700,size=4m
     networks: [edge, application, monitoring]
     depends_on:
       cloudflared: {condition: service_started}
@@ -46,118 +77,25 @@ services:
       retries: 6
 
   app-1:
-    image: ${APP_IMAGE:-laravel-app:local}
+    <<: *laravel
     build:
       context: .
       target: runtime
-    pull_policy: never
-    cgroup_parent: project-${COMPOSE_PROJECT_NAME:-laravel}.slice
-    restart: unless-stopped
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    logging:
-      driver: local
-      options: {max-size: "10m", max-file: "3"}
-    user: www-data
-    init: true
-    pids_limit: 256
-    env_file: ./docker/app.env
     command: [web]
-    volumes:
-      - uploads:/app/storage/app
-    tmpfs:
-      - /tmp:uid=33,gid=33,mode=1770,size=128m
-      - /app/bootstrap/cache:uid=33,gid=33,mode=0770,size=64m
-      - /app/storage/framework:uid=33,gid=33,mode=0770,size=128m
-      - /app/storage/logs:uid=33,gid=33,mode=0770,size=16m
-    networks: [application, data]
-    depends_on:
-      postgres: {condition: service_healthy}
-      redis: {condition: service_healthy}
-    stop_grace_period: 75s
-    healthcheck:
-      test: [CMD, php, /app/docker/health.php]
-      interval: 10s
-      timeout: 5s
-      retries: 6
-      start_period: 30s
+    healthcheck: *app-health
 
   app-2:
-    image: ${APP_IMAGE:-laravel-app:local}
-    pull_policy: never
-    cgroup_parent: project-${COMPOSE_PROJECT_NAME:-laravel}.slice
-    restart: unless-stopped
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    logging:
-      driver: local
-      options: {max-size: "10m", max-file: "3"}
-    user: www-data
-    init: true
-    pids_limit: 256
-    env_file: ./docker/app.env
+    <<: *laravel
     command: [web]
-    volumes:
-      - uploads:/app/storage/app
-    tmpfs:
-      - /tmp:uid=33,gid=33,mode=1770,size=128m
-      - /app/bootstrap/cache:uid=33,gid=33,mode=0770,size=64m
-      - /app/storage/framework:uid=33,gid=33,mode=0770,size=128m
-      - /app/storage/logs:uid=33,gid=33,mode=0770,size=16m
-    networks: [application, data]
-    depends_on:
-      postgres: {condition: service_healthy}
-      redis: {condition: service_healthy}
-    stop_grace_period: 75s
-    healthcheck:
-      test: [CMD, php, /app/docker/health.php]
-      interval: 10s
-      timeout: 5s
-      retries: 6
-      start_period: 30s
+    healthcheck: *app-health
 
   queue:
-    image: ${APP_IMAGE:-laravel-app:local}
-    pull_policy: never
-    cgroup_parent: project-${COMPOSE_PROJECT_NAME:-laravel}.slice
-    restart: unless-stopped
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    logging:
-      driver: local
-      options: {max-size: "10m", max-file: "3"}
-    user: www-data
-    init: true
-    pids_limit: 256
-    env_file: ./docker/app.env
+    <<: *laravel
     command: [queue]
-    volumes:
-      - uploads:/app/storage/app
-    tmpfs:
-      - /tmp:uid=33,gid=33,mode=1770,size=128m
-      - /app/bootstrap/cache:uid=33,gid=33,mode=0770,size=64m
-      - /app/storage/framework:uid=33,gid=33,mode=0770,size=128m
-      - /app/storage/logs:uid=33,gid=33,mode=0770,size=16m
-    networks: [application, data]
-    depends_on:
-      postgres: {condition: service_healthy}
-      redis: {condition: service_healthy}
-    stop_grace_period: 75s
-
 
   postgres:
+    <<: *service
     image: postgres:18.3-bookworm
-    cgroup_parent: project-${COMPOSE_PROJECT_NAME:-laravel}.slice
-    restart: unless-stopped
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    logging:
-      driver: local
-      options: {max-size: "10m", max-file: "3"}
     user: postgres
     pids_limit: 128
     environment:
@@ -169,10 +107,10 @@ services:
       DB_DATABASE: ${DB_DATABASE:-laravel}
       DB_USERNAME: ${DB_USERNAME:-laravel}
       DB_PASSWORD: ${DB_PASSWORD:?Falta DB_PASSWORD}
-    command: [postgres, -c, max_connections=60, -c, shared_buffers=256MB, -c, huge_pages=off]
+    command: [postgres, -c, max_connections=60, -c, shared_buffers=256MB]
     volumes:
       - postgres_data:/var/lib/postgresql
-      - ./docker/postgres-init.sh:/docker-entrypoint-initdb.d/10-app.sh:ro
+      - ./docker/postgres.sh:/docker-entrypoint-initdb.d/10-app.sh:ro
     tmpfs:
       - /tmp:mode=1777,size=64m
       - /var/run/postgresql:mode=1777,size=16m
@@ -187,24 +125,17 @@ services:
     stop_grace_period: 60s
 
   redis:
+    <<: *service
     image: redis:8.6.6-trixie
-    cgroup_parent: project-${COMPOSE_PROJECT_NAME:-laravel}.slice
-    restart: unless-stopped
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    logging:
-      driver: local
-      options: {max-size: "10m", max-file: "3"}
     user: redis
     pids_limit: 64
     environment:
-      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Falta REDIS_PASSWORD}
       REDIS_MAXMEMORY: ${REDIS_MAXMEMORY:-256mb}
     entrypoint: [/bin/sh, /usr/local/etc/redis/start.sh]
     volumes:
       - redis_data:/data
-      - ./docker/redis-start.sh:/usr/local/etc/redis/start.sh:ro
+      - ./docker/redis.sh:/usr/local/etc/redis/start.sh:ro
     tmpfs:
       - /tmp:mode=1777,size=16m
     networks: [data]
@@ -216,15 +147,8 @@ services:
     stop_grace_period: 30s
 
   cloudflared:
+    <<: *service
     image: cloudflare/cloudflared:2026.3.0
-    cgroup_parent: project-${COMPOSE_PROJECT_NAME:-laravel}.slice
-    restart: unless-stopped
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    logging:
-      driver: local
-      options: {max-size: "10m", max-file: "3"}
     user: "65532:65532"
     pids_limit: 64
     environment:
@@ -233,15 +157,8 @@ services:
     networks: [edge]
 
   prometheus:
+    <<: *service
     image: prom/prometheus:v3.13.3-distroless
-    cgroup_parent: project-${COMPOSE_PROJECT_NAME:-laravel}.slice
-    restart: unless-stopped
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    logging:
-      driver: local
-      options: {max-size: "10m", max-file: "3"}
     user: "65532:65532"
     init: true
     pids_limit: 128
@@ -270,15 +187,8 @@ services:
     stop_grace_period: 30s
 
   node-exporter:
+    <<: *service
     image: prom/node-exporter:v1.12.0
-    cgroup_parent: project-${COMPOSE_PROJECT_NAME:-laravel}.slice
-    restart: unless-stopped
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    logging:
-      driver: local
-      options: {max-size: "10m", max-file: "3"}
     user: "65534:65534"
     pid: host
     pids_limit: 64
@@ -287,7 +197,6 @@ services:
       - --path.procfs=/host/proc
       - --path.sysfs=/host/sys
       - --collector.textfile.directory=/host/var/lib/laravel-backup-status
-      # La red del contenedor no representa la del host. Trafico: cAdvisor.
       - --no-collector.netdev
       - --no-collector.netstat
       - --no-collector.sockstat
@@ -299,15 +208,14 @@ services:
       - /:/host:ro,rslave
     networks: [monitoring]
 
-  # Excepcion de confianza: el socket permite administrar Docker incluso montado :ro.
   cadvisor:
     image: ghcr.io/google/cadvisor:v0.60.5
-    cgroup_parent: project-${COMPOSE_PROJECT_NAME:-laravel}.slice
     privileged: true
     cgroup: host
     restart: unless-stopped
-    pids_limit: 128
     read_only: true
+    pids_limit: 128
+    logging: *logging
     command:
       - --docker_only=true
       - --housekeeping_interval=30s
@@ -324,13 +232,10 @@ services:
     tmpfs:
       - /tmp:mode=1777,size=32m
     networks: [monitoring]
-    logging:
-      driver: local
-      options: {max-size: "10m", max-file: "3"}
 
 networks:
-  edge: {}
-  application: {}
+  edge:
+  application:
   data:
     internal: true
   monitoring:

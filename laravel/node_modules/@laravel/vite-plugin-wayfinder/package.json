@@ -1,0 +1,40 @@
+{
+  "name": "@laravel/vite-plugin-wayfinder",
+  "version": "0.1.10",
+  "description": "Vite plugin for Laravel Wayfinder",
+  "keywords": [],
+  "author": "Taylor Otwell",
+  "license": "MIT",
+  "homepage": "https://github.com/laravel/vite-plugin-wayfinder#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/laravel/vite-plugin-wayfinder.git"
+  },
+  "bugs": {
+    "url": "https://github.com/laravel/vite-plugin-wayfinder/issues"
+  },
+  "main": "dist/index.cjs",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "minimatch": "^10.2.5",
+    "prettier": "^3.8.3",
+    "rollup": "^4.60.3",
+    "unbuild": "^3.6.1",
+    "vite": "^6.4.3"
+  },
+  "scripts": {
+    "prepublish": "pnpm run build",
+    "dev": "unbuild --stub",
+    "build": "unbuild",
+    "format": "prettier --write ."
+  }
+}
