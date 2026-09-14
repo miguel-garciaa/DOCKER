@@ -112,6 +112,19 @@ EOF
 fail2ban-client -t
 systemctl enable fail2ban
 systemctl restart fail2ban
+
+for attempt in {1..10}; do
+    fail2ban-client ping >/dev/null 2>&1 && break
+    sleep 1
+done
+
+if ! fail2ban-client ping >/dev/null 2>&1; then
+    systemctl status fail2ban --no-pager --full || true
+    journalctl -u fail2ban -n 30 --no-pager || true
+    echo "Fail2ban no ha podido arrancar."
+    exit 1
+fi
+
 fail2ban-client status sshd >/dev/null
 
 # Retira cualquier daemon de prueba que hubiera dejado la configuración TOTP.
